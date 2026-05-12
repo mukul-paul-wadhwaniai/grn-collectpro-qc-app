@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Dashboard – Grain Review</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+    <!-- Header -->
+    <header class="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-30">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-900 flex items-center gap-2">
+                        <span class="text-3xl">📊</span> Review Progress Dashboard
+                    </h1>
+                    <p class="text-xs text-gray-400 mt-0.5">
+                        Team: <strong class="text-indigo-600">{{ team }}</strong>
+                    </p>
+                </div>
+                <div class="flex items-center gap-4">
+                    <a href="/" class="text-sm text-indigo-600 hover:text-indigo-800 font-medium">← Back to Review</a>
+                    <a href="/logout" class="text-sm text-gray-400 hover:text-gray-600">Logout</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div id="content">
+            <p class="text-gray-400 text-center py-16">Loading dashboard…</p>
+        </div>
+    </main>
+
+    <script>
+        async function loadDashboard() {
+            try {
+                const res = await fetch('/api/dashboard');
+                if (!res.ok) throw new Error('Failed to load dashboard');
+                const data = await res.json();
+                renderDashboard(data);
+            } catch (e) {
+                document.getElementById('content').innerHTML = `
+                    <div class="text-red-600 text-center py-16 text-lg">${e.message}</div>`;
+            }
+        }
+
+        function renderDashboard(data) {
+            const container = document.getElementById('content');
+            container.innerHTML = '';
+
+            // ── Grand total ─────────────────────────────────────────
+            container.insertAdjacentHTML('beforeend', `
+                <div class="mb-6 text-sm text-gray-500">
+                    Total reviewable forms across all samples: <strong class="text-gray-900">${data.grand_total}</strong>
+                    &nbsp;·&nbsp; Samples: <strong class="text-gray-900">${data.samples.length}</strong>
+                </div>`);
+
+            // ── Team summary cards ──────────────────────────────────
+            let cardsHtml = '';
+            data.teams.forEach(t => {
+                const pct = t.pct;
+                const barColor = pct >= 80 ? 'bg-green-500' : pct >= 40 ? 'bg-yellow-500' : 'bg-red-400';
+                const pending = t.total - t.reviewed;
+                cardsHtml += `
+                    <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-5">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-bold text-gray-900">${t.team}</h3>
+                            <span class="text-2xl font-bold ${pct >= 80 ? 'text-green-600' : pct >= 40 ? 'text-yellow-600' : 'text-red-500'}">${pct}%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2.5 mb-3">
+                            <div class="${barColor} rounded-full h-2.5 transition-all" style="width:${pct}%"></div>
+                        </div>
+                        <div class="grid grid-cols-3 gap-2 text-center text-sm">
+                            <div>
+                                <div class="text-gray-500 text-xs">Reviewed</div>
+                                <div class="font-bold text-gray-900">${t.reviewed}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500 text-xs">Accepted</div>
+                                <div class="font-bold text-green-600">${t.accepted}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500 text-xs">Flagged</div>
+                                <div class="font-bold text-red-600">${t.flagged}</div>
+                            </div>
+                        </div>
+                        <div class="mt-2 text-xs text-gray-400 text-center">
+                            ${pending} pending
+                        </div>
+                    </div>`;
+            });
+            container.insertAdjacentHTML('beforeend', `
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    ${cardsHtml}
+                </div>`);
+
+            // ── Per-sample table ────────────────────────────────────
+            const teamNames = data.teams.map(t => t.team);
+            let teamHeaders = '';
+            teamNames.forEach(tn => {
+                teamHeaders += `<th class="py-2 px-3 text-center">${tn}</th>`;
+            });
+
+            let sampleRows = '';
+            data.samples.forEach(s => {
+                let cells = '';
+                teamNames.forEach(tn => {
+                    const ts = s.by_team[tn] || { reviewed: 0, accepted: 0, flagged: 0 };
+                    const pct = s.total_forms > 0
+                        ? Math.round(ts.reviewed / s.total_forms * 100)
+                        : 0;
+                    let color = 'text-gray-400';
+                    if (pct === 100) color = 'text-green-600 font-semibold';
+                    else if (pct > 0) color = 'text-yellow-600';
+
+                    const flagBadge = ts.flagged > 0
+                        ? `<span class="text-red-500 ml-1">(${ts.flagged}⚠)</span>`
+                        : '';
+
+                    cells += `
+                        <td class="py-2 px-3 text-center text-xs ${color}">
+                            ${ts.reviewed}/${s.total_forms} ${flagBadge}
+                        </td>`;
+                });
+
+                sampleRows += `
+                    <tr class="border-b border-gray-50 hover:bg-gray-50 transition">
+                        <td class="py-2 px-3 font-medium text-gray-900">${s.sample_number}</td>
+                        <td class="py-2 px-3 text-center text-gray-500 text-xs">${s.total_forms}</td>
+                        ${cells}
+                    </tr>`;
+            });
+
+            container.insertAdjacentHTML('beforeend', `
+                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
+                    <h2 class="text-lg font-bold text-gray-900 mb-4">Per-Sample Breakdown</h2>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="border-b border-gray-200 text-gray-500 text-xs uppercase tracking-wider">
+                                    <th class="py-2 px-3 text-left">Sample</th>
+                                    <th class="py-2 px-3 text-center">Forms</th>
+                                    ${teamHeaders}
+                                </tr>
+                            </thead>
+                            <tbody>${sampleRows}</tbody>
+                        </table>
+                    </div>
+                </div>`);
+        }
+
+        loadDashboard();
+    </script>
+</body>
+</html>

@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grain Analysis Review</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .card-enter { animation: fadeInUp 0.3s ease-out forwards; opacity: 0; }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .img-zoomable { cursor: zoom-in; transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .img-zoomable:hover { transform: scale(1.02); box-shadow: 0 8px 25px rgba(0,0,0,0.15); }
+        .cat-bar { transition: all 0.15s ease; }
+        .cat-bar.exists { cursor: pointer; }
+        .cat-bar.exists:hover { background-color: #f9fafb; }
+        .cat-bar.missing { opacity: 0.45; }
+        .expand-panel { max-height: 0; overflow: hidden; transition: max-height 0.35s ease; }
+        .expand-panel.open { max-height: 1500px; }
+        .chevron { transition: transform 0.2s ease; display: inline-block; }
+        .chevron.open { transform: rotate(90deg); }
+        /* Review button states */
+        .rv-btn { transition: all 0.15s ease; }
+        .rv-accept-active { background-color: #16a34a !important; color: white !important; border-color: #16a34a !important; }
+        .rv-flag-active   { background-color: #dc2626 !important; color: white !important; border-color: #dc2626 !important; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+    <!-- Header -->
+    <header class="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-30">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-900 flex items-center gap-2">
+                        <span class="text-3xl">🌾</span> WIAI Round 3 Collection Review
+                    </h1>
+                    <p class="text-xs text-gray-400 mt-0.5">
+                        Team: <strong class="text-indigo-600">{{ team }}</strong>
+                    </p>
+                </div>
+                <div class="flex items-center gap-3">
+                        <label class="text-sm font-medium text-gray-700">Sample</label>
+                        <select id="sample-select" class="rounded-lg border-gray-300 shadow-sm text-sm px-3 py-2 border min-w-[100px]">
+                            <option value="">— Select —</option>
+                            {% for sid in sample_numbers %}
+                            <option value="{{ sid }}">{{ sid }}</option>
+                            {% endfor %}
+                        </select>
+                    <button id="btn-go" onclick="loadSummary()" class="bg-indigo-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition shadow">
+                        Go
+                    </button>
+                    <a href="/dashboard" class="text-sm text-indigo-600 hover:text-indigo-800 font-medium transition ml-2">Dashboard</a>
+                    <a href="/logout" class="text-sm text-gray-400 hover:text-gray-600 transition ml-1" title="Logout">Logout</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div id="placeholder" class="flex flex-col items-center justify-center py-24 text-gray-400">
+            <svg class="w-16 h-16 mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+            </svg>
+            <p class="text-lg font-medium">Select a sample to begin review</p>
+        </div>
+        <div id="dashboard" class="hidden space-y-6"></div>
+    </main>
+
+    <!-- Full-res image modal -->
+    <div id="modal-backdrop" class="fixed inset-0 bg-black/80 z-50 hidden items-center justify-center p-4" onclick="closeModal()">
+        <img id="modal-image" src="" alt="Full resolution"
+             class="max-w-full max-h-[90vh] rounded-xl shadow-2xl object-contain bg-white"
+             onclick="event.stopPropagation()">
+    </div>
+
+    <script>
+        // ── Config from server ──────────────────────────────────────────
+        const TEAM = {{ team | tojson }};
+        const supercatOrder  = {{ supercat_order | tojson }};
+        const supercatLabels = {{ supercat_labels | tojson }};
+        const supercatGroups = {{ supercat_groups | tojson }};
+        const allCategories  = {{ all_categories | tojson }};
+        const fineAmbiguous  = new Set({{ fine_ambiguous | tojson }});
+
+        // ── State ───────────────────────────────────────────────────────
+        let currentSampleId = null;
+        let currentReviews  = {};   // { datapoint_id: { verdict, issue_types: [], remark } }
+        let issueTypesList  = [];   // global shared list
+        const DEPRECATED_ISSUES = new Set(['Debug issue', 'Multiple issues']);
+
+        // ── Helpers ─────────────────────────────────────────────────────
+        function escapeHtml(s) {
+            if (!s) return '';
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                    .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+        }
+
+        function formatIST(dateStr) {
+            if (!dateStr) return 'N/A';
+            try {
+                const d = new Date(dateStr);
+                return d.toLocaleString('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    day: '2-digit', month: '2-digit', year: '2-digit',
+                    hour: '2-digit', minute: '2-digit', hour12: true
+                });
+            } catch { return dateStr; }
+        }
+
+        function pretty(s) {
+            if (!s) return '';
+            return s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
+
+        function downloadBtn(imgPath) {
+            if (!imgPath) return '';
+            const filename = imgPath.split('/').pop();
+            return `<a href="/download/${filename}"
+                       class="inline-flex items-center gap-1 text-sm text-indigo-600 hover:text-indigo-800 font-medium transition"
+                       title="Download full-res image">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"/>
+                        </svg> Download
+                    </a>`;
+        }
+
+        function statusBadge(ok, label) {
+            if (ok) return `<span class="inline-flex items-center gap-1 text-green-700 bg-green-100 text-xs font-medium px-2 py-0.5 rounded-full">✅ ${escapeHtml(label)}</span>`;
+            return `<span class="inline-flex items-center gap-1 text-red-700 bg-red-100 text-xs font-medium px-2 py-0.5 rounded-full">❌ ${escapeHtml(label)}</span>`;
+        }
+
+        // ── Load Summary ────────────────────────────────────────────────
+        async function loadSummary() {
+            const sampleId = document.getElementById('sample-select').value;
+            if (!sampleId) return alert('Select a Sample ID first.');
+
+            const btn = document.getElementById('btn-go');
+            btn.textContent = 'Loading…';
+            btn.disabled = true;
+
+            try {
+                const [summaryRes, itRes] = await Promise.all([
+                    fetch(`/api/sample/${sampleId}/summary`),
+                    fetch('/api/issue-types'),
+                ]);
+                if (!summaryRes.ok) {
+                    const err = await summaryRes.json();
+                    throw new Error(err.error || 'Failed to load');
+                }
+                const data = await summaryRes.json();
+                issueTypesList = (await itRes.json()).filter(t => !DEPRECATED_ISSUES.has(t));
+                currentSampleId = parseInt(sampleId);
+                currentReviews = data.reviews || {};
+                renderDashboard(data);
+            } catch (e) {
+                alert(e.message);
+            } finally {
+                btn.textContent = 'Go';
+                btn.disabled = false;
+            }
+        }
+
+        // ── Render Dashboard ────────────────────────────────────────────
+        function renderDashboard(data) {
+            document.getElementById('placeholder').classList.add('hidden');
+            const dash = document.getElementById('dashboard');
+            dash.classList.remove('hidden');
+            dash.innerHTML = '';
+
+            renderMetadataBanner(dash, data);
+            renderDiagnostics(dash, data.diagnostics);
+            renderMixedImages(dash, data.mixed.images, data.mixed.datapoint_id);
+            renderCategoryGroups(dash, data.categories);
+        }
+
+        // ── Metadata Banner ─────────────────────────────────────────────
+        function renderMetadataBanner(container, data) {
+            const info = data.mixed?.info;
+            if (!info) {
+                container.insertAdjacentHTML('beforeend', `
+                    <div class="bg-red-50 border border-red-200 rounded-2xl p-5 text-red-700 font-medium">
+                        ⚠️ No mixed form found for Sample #${data.sample_id}
+                    </div>`);
+                return;
+            }
+            const moisture = (info.moisture || []).map(v => v ?? '-').join(', ');
+            container.insertAdjacentHTML('beforeend', `
+                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-5 card-enter">
+                    <h2 class="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
+                        📋 Sample #${data.sample_id}
+                    </h2>
+                    <div class="flex flex-wrap gap-x-8 gap-y-2 text-sm text-gray-700">
+                        <div><span class="font-semibold text-gray-900">User:</span> ${escapeHtml(info.user) || 'Unknown'}</div>
+                        <div><span class="font-semibold text-gray-900">Created:</span> ${formatIST(info.created_at)}</div>
+                        <div><span class="font-semibold text-gray-900">Updated:</span> ${formatIST(info.updated_at)}</div>
+                        <div><span class="font-semibold text-gray-900">Total Weight:</span> ${info.sample_weight ?? 'N/A'}g</div>
+                        <div><span class="font-semibold text-gray-900">Moisture:</span> ${moisture}</div>
+                        <div><span class="font-semibold text-gray-900">Background:</span> ${escapeHtml(info.background) || 'N/A'}</div>
+                        <div><span class="font-semibold text-gray-900">Variety:</span> ${escapeHtml(info.variety) || 'N/A'}</div>
+                    </div>
+                </div>`);
+        }
+
+        // ── Diagnostics Card ────────────────────────────────────────────
+        function renderDiagnostics(container, diag) {
+            const wDiffAbs = Math.abs(diag.weight_diff);
+            const wDiffColor = wDiffAbs > 1 ? 'text-red-600 font-bold' : 'text-green-600';
+            const missingRefs = diag.missing_mixed_refs.length > 0
+                ? `<span class="text-red-600 font-medium">Missing: ${diag.missing_mixed_refs.map(pretty).join(', ')}</span>`
+                : '<span class="text-green-600">All present</span>';
+
+            container.insertAdjacentHTML('beforeend', `
+                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-5 card-enter" style="animation-delay:50ms">
+                    <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3">Diagnostics</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Mixed Form</div>
+                            ${statusBadge(diag.mixed_exists, diag.mixed_exists ? 'Found' : 'Missing')}
+                        </div>
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Mixed Images</div>
+                            <div class="font-semibold">${diag.mixed_images_found} / ${diag.mixed_images_expected}</div>
+                            <div class="text-xs mt-0.5">${missingRefs}</div>
+                        </div>
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Weight Check</div>
+                            <div class="font-semibold">${diag.total_weight ?? 0}g total vs ${diag.sum_category_weights}g sum</div>
+                            <div class="text-xs mt-0.5 ${wDiffColor}">Δ = ${diag.weight_diff}g (${diag.weight_diff_pct}%)</div>
+                        </div>
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Categories</div>
+                            <div class="font-semibold">${diag.categories_collected} / ${diag.categories_expected} collected</div>
+                        </div>
+                    </div>
+                </div>`);
+        }
+
+        // ── Mixed Images Row ────────────────────────────────────────────
+        function renderMixedImages(container, images, mixedDatapointId) {
+            let cardsHtml = '';
+            images.forEach((img, idx) => {
+                const refLabel = pretty(img.ref);
+                if (img.has_image) {
+                    cardsHtml += `
+                        <div class="bg-white rounded-xl shadow border border-gray-200 overflow-hidden card-enter" style="animation-delay:${100 + idx*50}ms">
+                            <div class="relative">
+                                <img src="${img.image_path}" loading="lazy"
+                                     class="img-zoomable w-full object-contain bg-gray-100"
+                                     style="max-height: 220px;"
+                                     onclick="openModal('${img.image_path}')"
+                                     onerror="this.src='https://via.placeholder.com/400x300?text=Load+Failed'">
+                                <span class="absolute top-2 left-2 bg-indigo-600 text-white text-xs font-semibold uppercase px-2 py-0.5 rounded-full shadow">
+                                    ${escapeHtml(refLabel)}
+                                </span>
+                            </div>
+                            <div class="px-3 py-2 border-t border-gray-100 flex justify-end">
+                                ${downloadBtn(img.image_path)}
+                            </div>
+                </div>`;
+                } else {
+                    cardsHtml += `
+                        <div class="bg-gray-100 rounded-xl shadow border-2 border-dashed border-red-300 overflow-hidden flex flex-col items-center justify-center card-enter"
+                             style="min-height:180px; animation-delay:${100 + idx*50}ms">
+                            <svg class="w-10 h-10 text-red-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                                      d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                            </svg>
+                            <span class="text-red-400 text-xs font-semibold uppercase">${escapeHtml(refLabel)}</span>
+                            <span class="text-red-400 text-xs mt-0.5">Missing</span>
+                    </div>`;
+                }
+            });
+
+            // Review panel for mixed form
+            const reviewHtml = mixedDatapointId
+                ? reviewPanelHtml(mixedDatapointId, 'MixedSample_FineProtocol', '')
+                : '';
+
+            container.insertAdjacentHTML('beforeend', `
+                <div class="card-enter" style="animation-delay:100ms">
+                    <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3">Mixed Form Images</h3>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        ${cardsHtml}
+                    </div>
+                    ${reviewHtml}
+                </div>`);
+        }
+
+        // ── Category Groups ─────────────────────────────────────────────
+        function renderCategoryGroups(container, categories) {
+            const byName = {};
+            categories.forEach(c => { byName[c.name] = c; });
+
+            let delay = 200;
+            supercatOrder.forEach(sc => {
+                const catNames = supercatGroups[sc] || [];
+                if (catNames.length === 0) return;
+
+                const cats = catNames.map(n => byName[n]).filter(Boolean);
+                const collected = cats.filter(c => c.exists).length;
+                const total = cats.length;
+                const label = supercatLabels[sc] || sc;
+
+                let barsHtml = '';
+                cats.forEach(cat => {
+                    barsHtml += renderCategoryBar(cat, delay);
+                    delay += 20;
+                });
+
+                container.insertAdjacentHTML('beforeend', `
+                    <div>
+                        <div class="flex items-center gap-3 mb-2">
+                            <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider">${escapeHtml(sc)} — ${escapeHtml(label)}</h3>
+                            <span class="text-xs text-gray-400">${collected}/${total} collected</span>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden divide-y divide-gray-100">
+                            ${barsHtml}
+                        </div>
+                    </div>`);
+            });
+        }
+
+        // ── Single Category Bar ─────────────────────────────────────────
+        function renderCategoryBar(cat, delay) {
+            const name = pretty(cat.name);
+            const isAmb = cat.is_ambiguous;
+            const ambBadge = isAmb
+                ? '<span class="bg-yellow-100 text-yellow-700 text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-full">Amb</span>'
+                : '';
+
+            if (!cat.exists) {
+                return `
+                    <div class="cat-bar missing px-4 py-2.5 flex items-center gap-3 card-enter" style="animation-delay:${delay}ms">
+                        <span class="text-gray-300 text-xs">⬜</span>
+                        <span class="text-sm text-gray-400">${escapeHtml(name)}</span>
+                        ${ambBadge}
+                        <span class="ml-auto text-xs text-gray-300">Not collected</span>
+                    </div>`;
+                }
+
+            const weightStr = cat.weight != null ? `${cat.weight}g` : '—';
+            const expandId  = `expand-${cat.name}`;
+            const chevronId = `chev-${cat.name}`;
+            const dpId = cat.datapoint_id || '';
+
+            // Compact ambiguous breakdown
+            let ambChips = '';
+            if (isAmb && (cat.dg_weight != null || cat.gg_weight != null || cat.grg_weight != null)) {
+                ambChips = `<span class="text-xs text-gray-400 hidden sm:inline">DG:${cat.dg_weight ?? 0}g · GG:${cat.gg_weight ?? 0}g · GrG:${cat.grg_weight ?? 0}g</span>`;
+            }
+
+            const imgIcon = cat.has_image
+                ? '<span class="text-green-500 text-xs">🖼️</span>'
+                : '<span class="text-red-400 text-xs">⚠️ no img</span>';
+
+            // Review indicator on collapsed bar
+            const rev = dpId ? currentReviews[dpId] : null;
+            let revIndicator = '';
+            if (rev) {
+                revIndicator = rev.verdict === 'accept'
+                    ? '<span class="text-green-600 text-xs font-bold" title="Accepted">✓</span>'
+                    : '<span class="text-red-600 text-xs font-bold" title="Flagged">✗</span>';
+            }
+
+            // Review panel inside expand
+            const reviewHtml = dpId
+                ? reviewPanelHtml(dpId, cat.form_type || '', cat.name)
+                : '';
+
+            return `
+                <div class="card-enter" style="animation-delay:${delay}ms">
+                    <div class="cat-bar exists px-4 py-2.5 flex items-center gap-3"
+                         onclick="toggleExpand('${cat.name}')">
+                        <span id="${chevronId}" class="chevron text-gray-400 text-xs select-none">▶</span>
+                        <span class="text-sm font-semibold text-gray-800 min-w-[160px]">${escapeHtml(name)}</span>
+                        ${ambBadge}
+                        <span class="text-sm font-bold text-gray-900">${weightStr}</span>
+                        ${ambChips}
+                        <span class="ml-auto flex items-center gap-3">
+                            <span id="review-indicator-${dpId}">${revIndicator}</span>
+                            ${imgIcon}
+                            <span class="text-xs text-gray-400 hidden md:inline">${escapeHtml(cat.user || '')} · ${formatIST(cat.created_at)}</span>
+                        </span>
+                    </div>
+                    <div id="${expandId}" class="expand-panel">
+                        <div class="px-4 py-4 bg-gray-50 border-t border-gray-100 space-y-3">
+                            ${cat.has_image ? `
+                                <img data-src="${cat.image_path}"
+                                     class="img-zoomable deferred-img max-w-2xl w-full object-contain rounded-xl bg-white border border-gray-200 mx-auto"
+                                     style="max-height: 500px;"
+                                     onclick="event.stopPropagation(); openModal('${cat.image_path}')"
+                                     onerror="this.src='https://via.placeholder.com/400x300?text=Load+Failed'">
+                            ` : `
+                                <div class="bg-red-50 border-2 border-dashed border-red-300 rounded-xl p-6 text-center max-w-md mx-auto">
+                                    <span class="text-red-400 text-sm font-medium">⚠️ Image not available</span>
+                                </div>
+                            `}
+                            <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-gray-700">
+                                <div><span class="font-semibold">Weight:</span> ${weightStr}</div>
+                                <div><span class="font-semibold">Ref Object:</span> ${pretty(cat.ref_object) || 'N/A'}</div>
+                                <div><span class="font-semibold">Form:</span> ${isAmb ? 'Ambiguous' : 'Standard'}</div>
+                                <div><span class="font-semibold">User:</span> ${escapeHtml(cat.user) || 'N/A'}</div>
+                                <div><span class="font-semibold">Time:</span> ${formatIST(cat.created_at)}</div>
+                            </div>
+                            ${isAmb && (cat.dg_weight != null || cat.gg_weight != null || cat.grg_weight != null) ? `
+                                <div class="bg-yellow-50 rounded-lg p-3 text-sm inline-block">
+                                    <span class="text-xs font-bold text-yellow-700 uppercase mr-2">Supercategory:</span>
+                                    <strong>DG:</strong> ${cat.dg_weight ?? 0}g &nbsp;
+                                    <strong>GG:</strong> ${cat.gg_weight ?? 0}g &nbsp;
+                                    <strong>GrG:</strong> ${cat.grg_weight ?? 0}g
+                                </div>
+                            ` : ''}
+                            <div class="flex justify-end">
+                                ${downloadBtn(cat.image_path)}
+                            </div>
+                            ${reviewHtml}
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        // ═════════════════════════════════════════════════════════════════
+        // REVIEW PANEL
+        // ═════════════════════════════════════════════════════════════════
+        function reviewPanelHtml(datapointId, formType, sampleCategory) {
+            const rev = currentReviews[datapointId];
+            const verdict    = rev?.verdict || '';
+            const issueTypes = rev?.issue_types || [];
+            const remark     = rev?.remark || '';
+
+            const acceptCls = verdict === 'accept' ? 'rv-accept-active' : '';
+            const flagCls   = verdict === 'flag'   ? 'rv-flag-active'   : '';
+            const showFlag  = verdict === 'flag' ? '' : 'hidden';
+
+            const checkedSet = new Set(issueTypes);
+            let checkboxesHtml = '';
+            issueTypesList.forEach(t => {
+                const chk = checkedSet.has(t) ? 'checked' : '';
+                checkboxesHtml += `
+                    <label class="flex items-center gap-1.5 text-sm text-gray-700 cursor-pointer hover:text-gray-900">
+                        <input type="checkbox" class="rv-issue-cb-${datapointId} rounded border-gray-300 text-red-600 focus:ring-red-500"
+                               value="${escapeHtml(t)}" ${chk}>
+                        ${escapeHtml(t)}
+                    </label>`;
+            });
+
+            return `
+                <div class="border-t border-gray-200 pt-3 mt-3" id="rv-panel-${datapointId}">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-xs font-bold text-gray-500 uppercase">Review:</span>
+                        <button id="rv-accept-${datapointId}"
+                                class="rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:border-green-400 hover:text-green-700 ${acceptCls}"
+                                onclick="doAccept('${datapointId}','${escapeHtml(formType)}','${escapeHtml(sampleCategory)}')">
+                            ✅ Accept
+                        </button>
+                        <button id="rv-flag-${datapointId}"
+                                class="rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:border-red-400 hover:text-red-700 ${flagCls}"
+                                onclick="toggleFlagSection('${datapointId}')">
+                            ❌ Flag
+                        </button>
+                        <button id="rv-clear-${datapointId}"
+                                class="rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 bg-white text-gray-400 hover:border-gray-400 hover:text-gray-600 ${verdict ? '' : 'hidden'}"
+                                onclick="doClear('${datapointId}','${escapeHtml(formType)}','${escapeHtml(sampleCategory)}')">
+                            ↩ Clear
+                        </button>
+                        <span id="rv-status-${datapointId}" class="text-xs ml-auto ${verdict ? 'text-green-600' : 'text-gray-400'}">
+                            ${verdict ? '✓ Reviewed' : ''}
+                        </span>
+                    </div>
+                    <div id="rv-flag-section-${datapointId}" class="${showFlag} mt-2 space-y-2 pl-4 border-l-2 border-red-200">
+                        <div class="text-xs font-semibold text-gray-500 uppercase mb-1">Issue types (select all that apply):</div>
+                        <div id="rv-issues-list-${datapointId}" class="flex flex-wrap gap-x-4 gap-y-1.5">
+                            ${checkboxesHtml}
+                        </div>
+                        <div class="flex items-center gap-2 mt-1">
+                            <input type="text" id="rv-new-issue-${datapointId}"
+                                   class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 w-48"
+                                   placeholder="+ Add new issue type, Enter"
+                                   onkeydown="if(event.key==='Enter'){event.preventDefault();addIssueType('${datapointId}')}">
+                        </div>
+                        <button onclick="doFlag('${datapointId}','${escapeHtml(formType)}','${escapeHtml(sampleCategory)}')"
+                                class="px-4 py-1.5 bg-red-600 text-white rounded-lg text-xs font-semibold hover:bg-red-700 transition">
+                            Save Flag
+                        </button>
+                    </div>
+                    <div class="mt-2">
+                        <textarea id="rv-remark-${datapointId}" rows="2"
+                                  class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 w-full max-w-md"
+                                  placeholder="Remark (optional)">${escapeHtml(remark)}</textarea>
+                        <button onclick="saveRemark('${datapointId}','${escapeHtml(formType)}','${escapeHtml(sampleCategory)}')"
+                                class="mt-1 px-3 py-1 bg-gray-600 text-white rounded-lg text-[11px] font-semibold hover:bg-gray-700 transition">
+                            Save Remark
+                        </button>
+                    </div>
+                </div>`;
+        }
+
+        function getCheckedIssueTypes(dpId) {
+            return [...document.querySelectorAll(`.rv-issue-cb-${dpId}:checked`)].map(cb => cb.value);
+        }
+
+        // ── Accept (1-click auto-save) ──────────────────────────────────
+        async function doAccept(dpId, formType, sampleCat) {
+            const status = document.getElementById(`rv-status-${dpId}`);
+            status.textContent = 'Saving…';
+            status.className = 'text-xs ml-auto text-gray-400';
+            const remark = document.getElementById(`rv-remark-${dpId}`)?.value || null;
+
+            try {
+                const res = await fetch('/api/review', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        sample_number: currentSampleId,
+                        datapoint_id: dpId,
+                        form_type: formType,
+                        sample_category: sampleCat || null,
+                        verdict: 'accept',
+                        remark: remark,
+                    })
+                });
+                if (res.ok) {
+                    currentReviews[dpId] = { verdict: 'accept', issue_types: [], remark: remark };
+                    document.getElementById(`rv-accept-${dpId}`).className =
+                        'rv-btn px-3 py-1 rounded-full text-xs font-semibold border rv-accept-active';
+                    document.getElementById(`rv-flag-${dpId}`).className =
+                        'rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:border-red-400 hover:text-red-700';
+                    document.getElementById(`rv-flag-section-${dpId}`).classList.add('hidden');
+                    document.getElementById(`rv-clear-${dpId}`).classList.remove('hidden');
+                    status.textContent = '✓ Saved';
+                    status.className = 'text-xs ml-auto text-green-600';
+                    updateBarIndicator(dpId, 'accept');
+                } else {
+                    status.textContent = '⚠ Save failed';
+                    status.className = 'text-xs ml-auto text-red-600';
+                }
+            } catch {
+                status.textContent = '⚠ Save failed';
+                status.className = 'text-xs ml-auto text-red-600';
+            }
+        }
+
+        // ── Toggle flag detail section ──────────────────────────────────
+        function toggleFlagSection(dpId) {
+            const section = document.getElementById(`rv-flag-section-${dpId}`);
+            section.classList.toggle('hidden');
+            const flagBtn = document.getElementById(`rv-flag-${dpId}`);
+            if (!section.classList.contains('hidden')) {
+                flagBtn.className = 'rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-red-400 bg-red-50 text-red-700';
+            }
+        }
+
+        // ── Save flag (with details) ────────────────────────────────────
+        async function doFlag(dpId, formType, sampleCat) {
+            const issueTypes = getCheckedIssueTypes(dpId);
+            const remark = document.getElementById(`rv-remark-${dpId}`).value;
+
+            if (issueTypes.length === 0) {
+                alert('Please select at least one issue type.');
+                return;
+            }
+
+            const status = document.getElementById(`rv-status-${dpId}`);
+            status.textContent = 'Saving…';
+            status.className = 'text-xs ml-auto text-gray-400';
+
+            try {
+                const res = await fetch('/api/review', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        sample_number: currentSampleId,
+                        datapoint_id: dpId,
+                        form_type: formType,
+                        sample_category: sampleCat || null,
+                        verdict: 'flag',
+                        issue_types: issueTypes,
+                        remark: remark || null,
+                    })
+                });
+                if (res.ok) {
+                    currentReviews[dpId] = { verdict: 'flag', issue_types: issueTypes, remark };
+                    document.getElementById(`rv-flag-${dpId}`).className =
+                        'rv-btn px-3 py-1 rounded-full text-xs font-semibold border rv-flag-active';
+                    document.getElementById(`rv-accept-${dpId}`).className =
+                        'rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:border-green-400 hover:text-green-700';
+                    document.getElementById(`rv-clear-${dpId}`).classList.remove('hidden');
+                    status.textContent = '✓ Saved';
+                    status.className = 'text-xs ml-auto text-green-600';
+                    updateBarIndicator(dpId, 'flag');
+                } else {
+                    status.textContent = '⚠ Save failed';
+                    status.className = 'text-xs ml-auto text-red-600';
+                }
+            } catch {
+                status.textContent = '⚠ Save failed';
+                status.className = 'text-xs ml-auto text-red-600';
+            }
+        }
+
+        // ── Clear / delete review ───────────────────────────────────────
+        async function doClear(dpId, formType, sampleCat) {
+            const status = document.getElementById(`rv-status-${dpId}`);
+            status.textContent = 'Clearing…';
+            status.className = 'text-xs ml-auto text-gray-400';
+
+            try {
+                const res = await fetch('/api/review', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ datapoint_id: dpId })
+                });
+                if (res.ok) {
+                    delete currentReviews[dpId];
+                    document.getElementById(`rv-accept-${dpId}`).className =
+                        'rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:border-green-400 hover:text-green-700';
+                    document.getElementById(`rv-flag-${dpId}`).className =
+                        'rv-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:border-red-400 hover:text-red-700';
+                    document.getElementById(`rv-flag-section-${dpId}`).classList.add('hidden');
+                    document.getElementById(`rv-clear-${dpId}`).classList.add('hidden');
+                    document.querySelectorAll(`.rv-issue-cb-${dpId}`).forEach(cb => cb.checked = false);
+                    const remarkEl = document.getElementById(`rv-remark-${dpId}`);
+                    if (remarkEl) remarkEl.value = '';
+                    status.textContent = '';
+                    status.className = 'text-xs ml-auto text-gray-400';
+                    updateBarIndicator(dpId, null);
+                } else {
+                    status.textContent = '⚠ Clear failed';
+                    status.className = 'text-xs ml-auto text-red-600';
+                }
+            } catch {
+                status.textContent = '⚠ Clear failed';
+                status.className = 'text-xs ml-auto text-red-600';
+            }
+        }
+
+        // ── Save remark independently ─────────────────────────────────────
+        async function saveRemark(dpId, formType, sampleCat) {
+            const remark = document.getElementById(`rv-remark-${dpId}`).value;
+            const existing = currentReviews[dpId];
+            const verdict = existing?.verdict || 'accept';
+
+            const status = document.getElementById(`rv-status-${dpId}`);
+            status.textContent = 'Saving…';
+            status.className = 'text-xs ml-auto text-gray-400';
+
+            try {
+                const res = await fetch('/api/review', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        sample_number: currentSampleId,
+                        datapoint_id: dpId,
+                        form_type: formType,
+                        sample_category: sampleCat || null,
+                        verdict: verdict,
+                        issue_types: existing?.issue_types || [],
+                        remark: remark || null,
+                    })
+                });
+                if (res.ok) {
+                    if (existing) existing.remark = remark;
+                    else currentReviews[dpId] = { verdict, issue_types: [], remark };
+                    status.textContent = '✓ Remark saved';
+                    status.className = 'text-xs ml-auto text-green-600';
+                } else {
+                    status.textContent = '⚠ Save failed';
+                    status.className = 'text-xs ml-auto text-red-600';
+                }
+            } catch {
+                status.textContent = '⚠ Save failed';
+                status.className = 'text-xs ml-auto text-red-600';
+            }
+        }
+
+        // ── Add new issue type ──────────────────────────────────────────
+        async function addIssueType(dpId) {
+            const inp = document.getElementById(`rv-new-issue-${dpId}`);
+            const label = inp.value.trim();
+            if (!label) return;
+
+            try {
+                const res = await fetch('/api/issue-types', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ label })
+                });
+                if (res.ok || res.status === 409) {
+                    if (!issueTypesList.includes(label)) {
+                        issueTypesList.push(label);
+                        issueTypesList.sort();
+                    }
+                    refreshAllIssueCheckboxes(dpId, label);
+                    inp.value = '';
+                }
+            } catch {
+                alert('Failed to add issue type');
+            }
+        }
+
+        function refreshAllIssueCheckboxes(activeDpId, newLabel) {
+            document.querySelectorAll('[id^="rv-issues-list-"]').forEach(container => {
+                const dpId = container.id.replace('rv-issues-list-', '');
+                const currentChecked = new Set(getCheckedIssueTypes(dpId));
+                if (dpId === activeDpId) currentChecked.add(newLabel);
+
+                let html = '';
+                issueTypesList.forEach(t => {
+                    const chk = currentChecked.has(t) ? 'checked' : '';
+                    html += `
+                        <label class="flex items-center gap-1.5 text-sm text-gray-700 cursor-pointer hover:text-gray-900">
+                            <input type="checkbox" class="rv-issue-cb-${dpId} rounded border-gray-300 text-red-600 focus:ring-red-500"
+                                   value="${escapeHtml(t)}" ${chk}>
+                            ${escapeHtml(t)}
+                        </label>`;
+                });
+                container.innerHTML = html;
+            });
+        }
+
+        // ── Update bar indicator after save ─────────────────────────────
+        function updateBarIndicator(dpId, verdict) {
+            const el = document.getElementById(`review-indicator-${dpId}`);
+            if (!el) return;
+            if (verdict === 'accept')
+                el.innerHTML = '<span class="text-green-600 text-xs font-bold" title="Accepted">✓</span>';
+            else if (verdict === 'flag')
+                el.innerHTML = '<span class="text-red-600 text-xs font-bold" title="Flagged">✗</span>';
+            else
+                el.innerHTML = '';
+        }
+
+        // ── Toggle expand/collapse ──────────────────────────────────────
+        function toggleExpand(catName) {
+            const panel   = document.getElementById(`expand-${catName}`);
+            const chevron = document.getElementById(`chev-${catName}`);
+            if (panel) {
+                panel.classList.toggle('open');
+                if (chevron) chevron.classList.toggle('open');
+                if (panel.classList.contains('open')) {
+                    panel.querySelectorAll('img.deferred-img[data-src]').forEach(img => {
+                        if (!img.src || img.src === window.location.href) {
+                            img.src = img.dataset.src;
+                        }
+                    });
+                }
+            }
+        }
+
+        // ── Modal ───────────────────────────────────────────────────────
+        function openModal(src) {
+            document.getElementById('modal-image').src = src;
+            document.getElementById('modal-backdrop').classList.remove('hidden');
+            document.getElementById('modal-backdrop').classList.add('flex');
+        }
+        function closeModal() {
+            document.getElementById('modal-backdrop').classList.add('hidden');
+            document.getElementById('modal-backdrop').classList.remove('flex');
+        }
+    </script>
+</body>
+</html>
