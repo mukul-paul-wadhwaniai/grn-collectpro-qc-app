@@ -5,8 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Review Dashboard – Grain Review</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes nav-spin { to { transform: rotate(360deg); } }
+        .nav-spinner {
+            width: 100px; height: 100px;
+            border: 6px solid rgba(255, 255, 255, 0.25);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: nav-spin 0.8s linear infinite;
+        }
+    </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
+
+    <!-- Navigation loader (shown when opening a sample from the table) -->
+    <div id="nav-loader"
+         class="fixed inset-0 bg-black/60 z-50 hidden items-center justify-center flex-col gap-4 backdrop-blur-sm">
+        <div class="nav-spinner"></div>
+        <p id="nav-loader-text" class="text-white text-sm font-medium tracking-wide">Loading sample…</p>
+    </div>
 
     <!-- Header -->
     <header class="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-30">
@@ -129,7 +146,14 @@
 
                 sampleRows += `
                     <tr class="border-b border-gray-50 hover:bg-gray-50 transition">
-                        <td class="py-2 px-3 font-medium text-gray-900">${s.sample_number}</td>
+                        <td class="py-2 px-3 font-medium">
+                            <a href="/?sample=${s.sample_number}"
+                               class="text-indigo-600 hover:text-indigo-800 hover:underline"
+                               title="Open Sample #${s.sample_number} in review"
+                               onclick="showNavLoader(${s.sample_number})">
+                                ${s.sample_number}
+                            </a>
+                        </td>
                         <td class="py-2 px-3 text-center text-gray-500 text-xs">${s.total_forms}</td>
                         ${cells}
                     </tr>`;
@@ -154,6 +178,27 @@
         }
 
         loadDashboard();
+
+        // ── Navigation loader ─────────────────────────────────────────────
+        // Browsers keep showing the current page until the next one is
+        // ready to render. Loading the index page + sample summary takes
+        // a couple of seconds, so without this overlay the click feels
+        // dead.
+        function showNavLoader(sampleNumber) {
+            const loader = document.getElementById('nav-loader');
+            const text = document.getElementById('nav-loader-text');
+            if (text) text.textContent = `Opening Sample #${sampleNumber}…`;
+            loader.classList.remove('hidden');
+            loader.classList.add('flex');
+        }
+
+        // If the user navigates back via bfcache, the overlay would
+        // otherwise still be visible on the cached dashboard. Hide it.
+        window.addEventListener('pageshow', () => {
+            const loader = document.getElementById('nav-loader');
+            loader.classList.add('hidden');
+            loader.classList.remove('flex');
+        });
     </script>
 </body>
 </html>

@@ -762,6 +762,23 @@
             document.getElementById('modal-backdrop').classList.add('hidden');
             document.getElementById('modal-backdrop').classList.remove('flex');
         }
+
+        // ── Deep-link: open ?sample=N automatically ─────────────────────
+        // Used by the dashboard's per-sample table so users can jump
+        // straight from a row into the review view for that sample.
+        (function loadFromQueryString() {
+            const params = new URLSearchParams(window.location.search);
+            const requested = params.get('sample');
+            if (!requested) return;
+            const select = document.getElementById('sample-select');
+            const exists = [...select.options].some(o => o.value === requested);
+            if (!exists) {
+                alert(`Sample #${requested} is not in the current dataset.`);
+                return;
+            }
+            select.value = requested;
+            loadSummary();
+        })();
     </script>
 </body>
 </html>
