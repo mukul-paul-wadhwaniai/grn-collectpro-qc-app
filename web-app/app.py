@@ -1,7 +1,9 @@
 import os
+import re
+import math
 import secrets
+import sys
 import threading
-from uuid import uuid4
 from collections import defaultdict
 
 import pandas as pd
@@ -10,35 +12,40 @@ from flask import (
     Flask, render_template, jsonify, request,
     send_from_directory, session, redirect, url_for,
 )
-from google.cloud import storage
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from util import ensure_s3_image_cached, parse_s3_url
 
 from db import (
     init_db, save_review, delete_review, get_reviews_for_sample,
     get_all_reviews, get_issue_types, add_issue_type,
+    get_review_counts_by_sample_and_team,
 )
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 DATA_FILE = "/data/temp_dir/latest.parquet"
+SAMPLES_DASHBOARD_FILE = os.environ.get(
+    "SAMPLES_DASHBOARD_FILE",
+    "/data/temp_dir/samples_dashboard.parquet",
+)
 STATIC_IMG_DIR = Path("static/images")
+S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "agri-grn-prod-dip-bucket")
 
 # Team accounts: username → { password, team }
 TEAM_ACCOUNTS = {
-    "ml":         {"password": "qM565~v-Tw\K", "team": "ML"},
-    "programmes": {"password": "qM565~v-Tw\K", "team": "Programmes"},
-    "product":    {"password": "qM565~v-Tw\K", "team": "Product"},
+    "ml":         {"password": r"qM565~v-Tw\K", "team": "ML"},
+    "programmes": {"password": r"qM565~v-Tw\K", "team": "Programmes"},
+    "product":    {"password": r"qM565~v-Tw\K", "team": "Product"},
 }
 TEAMS = ["ML", "Programmes", "Product"]
 
-try:
-    GCS_CLIENT = storage.Client()
-except Exception as e:
-    print(f"ERROR: Failed to initialize GCS client (check credentials): {e}")
-    exit(1)
-
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
+# app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 STATIC_IMG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -102,57 +109,35 @@ for _cat, _sc in ALL_CATEGORIES.items():
 
 
 # ---------------------------------------------------------------------------
-# GCP Utility
-# ---------------------------------------------------------------------------
-def download_image_from_gcs_bucket(gcp_url: str, temp_dir: Path = Path("tmp"),
-                                   imagename: str | None = None):
-    """Download a blob from GCP using a gs:// URL."""
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        parts = gcp_url.split("/")
-        if len(parts) < 4 or parts[0] != "gs:":
-            print(f"ERROR: Invalid GCP URL format: {gcp_url}")
-            return None
-        bucket_name = parts[2]
-        blob_name = "/".join(parts[3:])
-        bucket = GCS_CLIENT.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        if not blob.exists():
-            print(f"ERROR: Blob {blob_name} does not exist in bucket {bucket_name}.")
-            return None
-        temp_path = temp_dir / (imagename or f"{uuid4()}.jpg")
-        blob.download_to_filename(temp_path)
-        return str(temp_path.resolve())
-    except Exception as e:
-        print(f"ERROR: Error processing {gcp_url}: {e}")
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Pre-fetch images
+# Pre-fetch images (S3 → VM local cache)
 # ---------------------------------------------------------------------------
 def pre_download_images(dataframe):
-    print("Checking and pre-fetching images from GCP …")
+    """Download missing images from S3 into static/images for the review UI."""
+    print(f"Checking and pre-fetching images from S3 (bucket={S3_BUCKET_NAME}) …")
+    STATIC_IMG_DIR.mkdir(parents=True, exist_ok=True)
     local_paths = []
+    n_downloaded = 0
     for _, row in dataframe.iterrows():
-        gcp_url = row.get("gcp_url")
-        if not gcp_url or pd.isna(gcp_url):
+        s3_url = row.get("s3_url")
+        if not s3_url or pd.isna(s3_url):
             local_paths.append(None)
             continue
-        filename = gcp_url.split("/")[-1]
+        _, _, filename = parse_s3_url(str(s3_url))
         local_filepath = STATIC_IMG_DIR / filename
-        if not local_filepath.exists():
-            download_image_from_gcs_bucket(
-                gcp_url=gcp_url,
-                temp_dir=Path(STATIC_IMG_DIR),
-                imagename=filename,
-            )
-        if local_filepath.exists():
+        existed = local_filepath.exists() and local_filepath.stat().st_size > 0
+        cached = ensure_s3_image_cached(
+            s3_url=str(s3_url),
+            cache_dir=STATIC_IMG_DIR,
+            bucket_name=S3_BUCKET_NAME,
+        )
+        if cached and not existed:
+            n_downloaded += 1
+        if cached and cached.exists():
             local_paths.append(f"/static/images/{filename}")
         else:
             local_paths.append(None)
     dataframe["local_image_path"] = local_paths
-    print("GCP image sync complete.")
+    print(f"S3 image sync complete ({n_downloaded} newly downloaded).")
     return dataframe
 
 
@@ -171,7 +156,9 @@ def sanitize(val):
 # ---------------------------------------------------------------------------
 _data_lock = threading.Lock()
 _parquet_mtime: float = 0.0
+_samples_dashboard_mtime: float = 0.0
 df: pd.DataFrame | None = None
+samples_dashboard_df: pd.DataFrame | None = None
 SAMPLE_NUMBERS: list[int] = []
 
 
@@ -207,6 +194,30 @@ def _load_data():
             _parquet_mtime = os.path.getmtime(DATA_FILE)
         except OSError:
             pass
+    _reload_samples_dashboard()
+
+
+def _mtime_or_zero(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _reload_samples_dashboard():
+    """Load samples_dashboard.parquet into memory (small file)."""
+    global samples_dashboard_df, _samples_dashboard_mtime
+    try:
+        samples_dashboard_df = pd.read_parquet(SAMPLES_DASHBOARD_FILE)
+        _samples_dashboard_mtime = _mtime_or_zero(SAMPLES_DASHBOARD_FILE)
+        print(
+            f"✅ Loaded samples dashboard ({len(samples_dashboard_df)} rows) "
+            f"from {SAMPLES_DASHBOARD_FILE}"
+        )
+    except Exception as e:
+        print(f"⚠️ Samples dashboard load skipped: {e}")
+        samples_dashboard_df = None
+        _samples_dashboard_mtime = _mtime_or_zero(SAMPLES_DASHBOARD_FILE)
 
 
 # Initial load + DB init
@@ -223,11 +234,9 @@ def _auto_sync():
     Requests that arrive while a reload is in progress simply proceed
     with the current (slightly stale but valid) data.
     """
-    try:
-        current_mtime = os.path.getmtime(DATA_FILE)
-    except OSError:
-        return
-    if current_mtime == _parquet_mtime:
+    m_main = _mtime_or_zero(DATA_FILE)
+    m_dash = _mtime_or_zero(SAMPLES_DASHBOARD_FILE)
+    if m_main == _parquet_mtime and m_dash == _samples_dashboard_mtime:
         return
 
     # Non-blocking: if another thread is already reloading, serve current data
@@ -236,14 +245,16 @@ def _auto_sync():
         return
 
     try:
-        # Double-check after acquiring lock (another thread may have just finished)
-        try:
-            if os.path.getmtime(DATA_FILE) == _parquet_mtime:
-                return
-        except OSError:
+        m_main = _mtime_or_zero(DATA_FILE)
+        m_dash = _mtime_or_zero(SAMPLES_DASHBOARD_FILE)
+        if m_main == _parquet_mtime and m_dash == _samples_dashboard_mtime:
             return
-        print("📦 Parquet file changed on disk — reloading …")
-        _load_data()
+        if m_main != _parquet_mtime:
+            print("📦 Parquet file changed on disk — reloading …")
+            _load_data()
+        else:
+            print("📦 Samples dashboard parquet changed — reloading …")
+            _reload_samples_dashboard()
     finally:
         _data_lock.release()
 
@@ -526,6 +537,210 @@ def api_add_issue_type():
 
 
 # ---------------------------------------------------------------------------
+# Dashboard analytics (sample-level + collector-level tables)
+# ---------------------------------------------------------------------------
+def _sample_totals_from_main_df() -> dict[int, int]:
+    """Unique datapoint_ids per sample from the image-review parquet."""
+    if df is None or df.empty:
+        return {}
+    out: dict[int, int] = {}
+    for sn, sdf in df.groupby("sample_number"):
+        out[int(sn)] = int(sdf["datapoint_id"].nunique())
+    return out
+
+
+def _analytics_samples_fallback() -> list[dict]:
+    """Approximate per-sample stats from latest.parquet only (no raw duplicates / metadata)."""
+    if df is None or df.empty:
+        return []
+    work = df.copy()
+    work["_created"] = pd.to_datetime(work["created_at"], utc=True, errors="coerce")
+    work["_updated"] = pd.to_datetime(work["updated_at"], utc=True, errors="coerce")
+    rows: list[dict] = []
+    for sn, g in work.groupby("sample_number"):
+        sn = int(sn)
+        mixed = g[g["form_type"] == MIXED_FORM].sort_values("_created", ascending=True)
+        if not mixed.empty:
+            collected_by = str(mixed.iloc[0]["user"])
+        else:
+            collected_by = str(g.sort_values("_created", ascending=True).iloc[0]["user"])
+        n_mixed = int(g[g["form_type"] == MIXED_FORM]["datapoint_id"].nunique())
+        cat = g[g["form_type"].isin([CATEGORY_FORM, AMBIGUOUS_FORM])]
+        n_sub = int(len(cat))
+        n_sub_u = (
+            int(cat.groupby(["form_type", "sample_category"]).ngroups) if n_sub else 0
+        )
+        fc = g["_created"].min()
+        lu = g["_updated"].max()
+        delta_s = None
+        if pd.notna(fc) and pd.notna(lu):
+            delta_s = float((lu - fc).total_seconds())
+        rows.append(
+            {
+                "sample_number": sn,
+                "collected_by": collected_by,
+                "n_subcategory_forms": n_sub,
+                "n_subcategory_forms_unique": n_sub_u,
+                "n_mixed_forms": n_mixed,
+                "n_additional_metadata_forms": 0,
+                "first_form_created_at": fc,
+                "last_form_updated_at": lu,
+                "collection_time_seconds": delta_s,
+            }
+        )
+    rows.sort(key=lambda r: r["sample_number"])
+    return rows
+
+
+def _json_safe_analytics_value(val):
+    if val is None:
+        return None
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    if pd.isna(val):
+        return None
+    if isinstance(val, pd.Timestamp):
+        return val.isoformat()
+    # numpy scalar int/float
+    if hasattr(val, "item"):
+        try:
+            return val.item()
+        except Exception:
+            pass
+    return val
+
+
+def _canonical_team(team_raw: str) -> str | None:
+    """Map DB team string onto TEAMS entry (case-insensitive, trimmed)."""
+    t = str(team_raw).strip()
+    for canonical in TEAMS:
+        if t.lower() == canonical.lower():
+            return canonical
+    return None
+
+
+def _merge_reviews_into_sample_rows(
+    sample_rows: list[dict],
+    sample_totals: dict[int, int],
+) -> list[dict]:
+    review_counts = get_review_counts_by_sample_and_team()
+    idx: dict[tuple[int, str], dict] = {}
+    for r in review_counts:
+        sn_key = int(r["sample_number"])
+        tr = str(r["team"]).strip()
+        canon = _canonical_team(tr)
+        key_team = canon if canon is not None else tr
+        idx[(sn_key, key_team)] = dict(r)
+    merged: list[dict] = []
+    for row in sample_rows:
+        sn = int(row["sample_number"])
+        total = int(sample_totals.get(sn, 0))
+        total_flags = 0
+        out = dict(row)
+        for t in TEAMS:
+            rc = idx.get((sn, t), {})
+            nf = int(rc.get("n_flagged", 0) or 0)
+            na = int(rc.get("n_accepted", 0) or 0)
+            nr = int(rc.get("n_reviewed", 0) or 0)
+            total_flags += nf
+            out[f"reviewed_{t}"] = nr
+            out[f"accepted_{t}"] = na
+            out[f"flagged_{t}"] = nf
+        out["total_reviewable_forms"] = total
+        out["flags_all_teams"] = total_flags
+        merged.append(out)
+    return merged
+
+
+def _build_collectors_rows(sample_rows: list[dict]) -> list[dict]:
+    by_user: dict[str, dict] = defaultdict(
+        lambda: {"samples": set(), "times": [], "flagged_samples": set()}
+    )
+    for r in sample_rows:
+        u = r.get("collected_by") or "Unknown"
+        by_user[u]["samples"].add(int(r["sample_number"]))
+        t = r.get("collection_time_seconds")
+        if t is not None and not (isinstance(t, float) and math.isnan(t)):
+            by_user[u]["times"].append(float(t))
+        if int(r.get("flags_all_teams") or 0) > 0:
+            by_user[u]["flagged_samples"].add(int(r["sample_number"]))
+    out: list[dict] = []
+    for user in sorted(by_user.keys(), key=str.lower):
+        d = by_user[user]
+        times = d["times"]
+        med = float(pd.Series(times).median()) if times else None
+        out.append(
+            {
+                "collector": user,
+                "n_samples": len(d["samples"]),
+                "n_samples_with_any_flag": len(d["flagged_samples"]),
+                "median_collection_time_seconds": med,
+            }
+        )
+    return out
+
+
+_ISO_DT_PREFIX = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})",
+)
+
+
+def _truncate_display_datetime(val):
+    """API display: YYYY-MM-DDTHH:MM:SS only (no subseconds / timezone tail)."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return None
+    if isinstance(val, pd.Timestamp):
+        return val.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        ts = pd.Timestamp(val)
+        if not pd.isna(ts):
+            return ts.strftime("%Y-%m-%dT%H:%M:%S")
+    except (TypeError, ValueError, OverflowError):
+        pass
+    s = _json_safe_analytics_value(val)
+    if not isinstance(s, str):
+        return s
+    s = s.strip()
+    if len(s) >= 11 and s[10] == " ":
+        s = s[:10] + "T" + s[11:]
+    m = _ISO_DT_PREFIX.match(s)
+    if m:
+        return m.group(1).replace(" ", "T")
+    if len(s) >= 19:
+        return s[:19].replace(" ", "T", 1)
+    return s
+
+
+def _serialize_analytics_row(row: dict) -> dict:
+    out = {}
+    for k, v in row.items():
+        if k in ("first_form_created_at", "last_form_updated_at"):
+            out[k] = _truncate_display_datetime(v)
+        else:
+            out[k] = _json_safe_analytics_value(v)
+    return out
+
+
+def build_dashboard_analytics_payload() -> dict:
+    sample_totals = _sample_totals_from_main_df()
+    if samples_dashboard_df is not None and not samples_dashboard_df.empty:
+        base_rows = samples_dashboard_df.to_dict("records")
+        source = "parquet"
+    else:
+        base_rows = _analytics_samples_fallback()
+        source = "fallback"
+    merged = _merge_reviews_into_sample_rows(base_rows, sample_totals)
+    samples_out = [_serialize_analytics_row(r) for r in merged]
+    collectors_out = [_serialize_analytics_row(r) for r in _build_collectors_rows(merged)]
+    return {
+        "samples": samples_out,
+        "collectors": collectors_out,
+        "source": source,
+        "teams": TEAMS,
+    }
+
+
+# ---------------------------------------------------------------------------
 # API: Dashboard stats
 # ---------------------------------------------------------------------------
 @app.route("/api/dashboard")
@@ -544,10 +759,11 @@ def api_dashboard():
     # Aggregate per team per sample
     team_sample_stats: dict[str, dict] = {t: {} for t in TEAMS}
     for rev in all_reviews:
-        t = rev["team"]
+        t_raw = str(rev["team"]).strip()
+        t = _canonical_team(t_raw)
+        if t is None:
+            continue
         sn = rev["sample_number"]
-        if t not in team_sample_stats:
-            team_sample_stats[t] = {}
         if sn not in team_sample_stats[t]:
             team_sample_stats[t][sn] = {"reviewed": 0, "accepted": 0, "flagged": 0}
         team_sample_stats[t][sn]["reviewed"] += 1
@@ -600,6 +816,14 @@ def api_dashboard():
     })
 
 
+@app.route("/api/dashboard/analytics")
+def api_dashboard_analytics():
+    """Sortable/filterable sample + collector tables (merged with reviews.db)."""
+    if not is_logged_in():
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(build_dashboard_analytics_payload())
+
+
 # ---------------------------------------------------------------------------
 # Routes: Dashboard page
 # ---------------------------------------------------------------------------
@@ -630,4 +854,5 @@ def download_image(filename):
 if __name__ == "__main__":
     print(f"Teams: {', '.join(TEAMS)}")
     print(f"Accounts: {', '.join(TEAM_ACCOUNTS.keys())}")
-    app.run(host="0.0.0.0", port=7865, debug=False)
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+    app.run(host="0.0.0.0", port=7865, debug=debug, use_reloader=debug)

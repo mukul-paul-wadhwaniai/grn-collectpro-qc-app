@@ -7,16 +7,13 @@ from datetime import datetime
 from util import (
     fetch_latest_data,
     setup_df,
-    push_images_to_gcp,
-    logger
+    logger,
 )
 
 DEBUG_SAMPLE_NUMBERS = [0, 1, 2]
 
 S3_BUCKET_NAME = 'agri-grn-prod-dip-bucket'
-GCS_BUCKET_NAME = "bucket-prod-grn-asso1-fga-vm-data"
 PROJECT_NAME = "GRN WIAI Round 3 Collection"
-GCS_ROOT = f"temp_dir"
 SOURCE = "wiai_round_3_collection"
 
 # Form Constants
@@ -24,6 +21,16 @@ MIXED_FORM = "MixedSample_FineProtocol"
 CATEGORY_FORM = "CategorySample_FineProtocol"
 AMBIGUOUS_FORM = "CategorySample_Ambiguous_FineProtocol"
 FORM_NAMES = [MIXED_FORM, CATEGORY_FORM, AMBIGUOUS_FORM]
+
+# Optional extra form types (e.g. Additional Metadata) — comma-separated
+# exact names as in projectapp_dataset.name / projectapp_datapoint join.
+# EXTRA_FORM_NAMES = [
+#     x.strip()
+#     for x in os.environ.get("GRN_EXTRA_FORM_NAMES", "").split(",")
+#     if x.strip()
+# ]
+EXTRA_FORM_NAMES = [ "Additional metadata fine protocol", "Additional Metadata Fine Protocol" ]
+ALL_FORM_NAMES = list(dict.fromkeys(FORM_NAMES + EXTRA_FORM_NAMES))
 
 # list of users for this season's collection
 VALID_USERS = ["kailas", "Vipin", "Pradip"]
@@ -38,6 +45,32 @@ REF_NAME_MAPPING = {
     'sample_with_rs_50_note': '50_note',
     'sample_with_rs_100_note': '100_note'
 }
+
+
+def extract_sample_number(data) -> int | None:
+    """
+    Resolve sample_number from form JSON.
+
+    Mixed/category forms use data['sample_metadata']['sample_number'].
+    Additional-metadata forms store sample_number at the top level of data.
+    """
+    if not isinstance(data, dict):
+        return None
+    sample_meta = data.get("sample_metadata")
+    if isinstance(sample_meta, dict):
+        sn = sample_meta.get("sample_number")
+        if sn is not None and sn != "":
+            try:
+                return int(sn)
+            except (TypeError, ValueError):
+                pass
+    sn = data.get("sample_number")
+    if sn is not None and sn != "":
+        try:
+            return int(sn)
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 # Output directory for timestamped parquet archives
@@ -129,8 +162,119 @@ def validate_and_dedup(df: pd.DataFrame, is_processed=False):
 
 def get_latest_parquet(output_dir: Path) -> Path | None:
     """Find the most recent parquet file in the output directory by name (YYYYMMDD_HHMMSS)."""
-    parquets = sorted(p for p in output_dir.glob("*.parquet") if not p.is_symlink())
+    parquets = sorted(
+        p
+        for p in output_dir.glob("*.parquet")
+        if not p.is_symlink() and not p.name.startswith("samples_dashboard_")
+    )
     return parquets[-1] if parquets else None
+
+
+def _category_keys_vectorized(cat_df: pd.DataFrame) -> pd.Series:
+    """(form_name, sample_category) per row for category / ambiguous forms."""
+    def _cat(row):
+        try:
+            meta = row["data"].get("sample_metadata", {})
+            return (row["form_name"], meta.get("sample_category"))
+        except Exception:
+            return (row["form_name"], None)
+
+    return cat_df.apply(_cat, axis=1)
+
+
+def build_samples_dashboard_summary(
+    raw_df: pd.DataFrame,
+    metadata_form_names: list[str],
+) -> pd.DataFrame:
+    """
+    One row per sample_number from raw (pre-dedup) datapoints.
+
+    Counts include all submitted forms so duplicates are visible.
+    """
+    if raw_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "sample_number",
+                "collected_by",
+                "n_subcategory_forms",
+                "n_subcategory_forms_unique",
+                "n_mixed_forms",
+                "n_additional_metadata_forms",
+                "first_form_created_at",
+                "last_form_updated_at",
+                "collection_time_seconds",
+            ]
+        )
+
+    work = raw_df.copy()
+    work["created_at"] = pd.to_datetime(work["created_at"], utc=True, errors="coerce")
+    work["updated_at"] = pd.to_datetime(work["updated_at"], utc=True, errors="coerce")
+
+    meta_set = set(metadata_form_names)
+    rows = []
+    for sn, g in work.groupby("sample_number", sort=True):
+        sn = int(sn)
+        first_created = g["created_at"].min()
+        last_updated = g["updated_at"].max()
+        if pd.isna(first_created) or pd.isna(last_updated):
+            delta_s = None
+        else:
+            delta_s = (last_updated - first_created).total_seconds()
+
+        mixed_g = g[g["form_name"] == MIXED_FORM].sort_values("created_at", ascending=True)
+        if not mixed_g.empty:
+            collected_by = str(mixed_g.iloc[0]["username"])
+        else:
+            g_sorted = g.sort_values("created_at", ascending=True)
+            collected_by = str(g_sorted.iloc[0]["username"])
+
+        n_mixed = g[g["form_name"] == MIXED_FORM]["datapoint_id"].nunique()
+
+        cat_g = g[g["form_name"].isin([CATEGORY_FORM, AMBIGUOUS_FORM])]
+        n_sub = int(len(cat_g))
+        if len(cat_g) == 0:
+            n_sub_u = 0
+        else:
+            keys = _category_keys_vectorized(cat_g)
+            n_sub_u = int(keys.nunique())
+
+        if meta_set:
+            n_meta = int(g[g["form_name"].isin(meta_set)]["datapoint_id"].nunique())
+        else:
+            n_meta = 0
+
+        rows.append(
+            {
+                "sample_number": sn,
+                "collected_by": collected_by,
+                "n_subcategory_forms": n_sub,
+                "n_subcategory_forms_unique": n_sub_u,
+                "n_mixed_forms": int(n_mixed),
+                "n_additional_metadata_forms": n_meta,
+                "first_form_created_at": first_created,
+                "last_form_updated_at": last_updated,
+                "collection_time_seconds": float(delta_s) if delta_s is not None else None,
+            }
+        )
+
+    out = pd.DataFrame(rows).sort_values("sample_number").reset_index(drop=True)
+    return out
+
+
+def write_samples_dashboard_parquet(df: pd.DataFrame, output_dir: Path) -> Path:
+    """Write timestamped parquet and atomically update samples_dashboard symlink."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = output_dir / f"samples_dashboard_{timestamp}.parquet"
+    df.to_parquet(out_path, index=False)
+
+    tmp_link = output_dir / f".samples_dash_{os.getpid()}.tmp"
+    if tmp_link.is_symlink() or tmp_link.exists():
+        tmp_link.unlink()
+    tmp_link.symlink_to(out_path)
+    tmp_link.rename(output_dir / "samples_dashboard.parquet")
+    logger.info(f"✅ Samples dashboard saved → {out_path.name} (symlink updated)")
+    return out_path
 
 
 def process_sample_group(sample_number, sample_df, skip_datapoint_ids=None):
@@ -242,24 +386,32 @@ def main():
 
     # 1. Fetch fresh CSVs from DB
     fetch_latest_data()
-    
-    # 2. Build raw dataframe (all valid entries from DB)
-    raw_df = setup_df(
-        valid_users=VALID_USERS, 
-        form_names=FORM_NAMES, 
-        project_name=PROJECT_NAME
+
+    # 2. Build raw dataframe including optional extra forms (metadata, etc.)
+    raw_full = setup_df(
+        valid_users=VALID_USERS,
+        form_names=ALL_FORM_NAMES,
+        project_name=PROJECT_NAME,
     )
 
-    # Extract sample_number for grouping
-    raw_df['sample_number'] = raw_df['data'].apply(lambda x: x.get('sample_metadata', {}).get('sample_number'))
+    # Extract sample_number for grouping (schema differs by form type)
+    raw_full["sample_number"] = raw_full["data"].apply(extract_sample_number)
 
-    # assert none of the datapoint_ids, sample_numbers are None
-    assert not raw_df['datapoint_id'].isnull().any(), "found None datapoint_id"
-    assert not raw_df['sample_number'].isnull().any(), "found None sample_number"
+    assert not raw_full["datapoint_id"].isnull().any(), "found None datapoint_id"
+    missing_sn = raw_full["sample_number"].isnull()
+    if missing_sn.any():
+        by_form = raw_full.loc[missing_sn, "form_name"].value_counts().to_dict()
+        logger.warning(
+            f"Dropping {int(missing_sn.sum())} datapoints with no sample_number: {by_form}"
+        )
+        raw_full = raw_full[~missing_sn].copy()
 
-    # TODO: Figure out how to do this once debugging stage is over
-    # drop samples with sample_number in DEBUG_SAMPLE_NUMBERS
-    # raw_df = raw_df[~raw_df['sample_number'].isin(DEBUG_SAMPLE_NUMBERS)]
+    # 2b. Unified per-sample dashboard table (pre-dedup counts, all form types)
+    dashboard_df = build_samples_dashboard_summary(raw_full, EXTRA_FORM_NAMES)
+    write_samples_dashboard_parquet(dashboard_df, OUTPUT_DIR)
+
+    # 2c. Pipeline subset: only image-bearing protocol forms
+    raw_df = raw_full[raw_full["form_name"].isin(FORM_NAMES)].copy()
 
     raw_df = validate_and_dedup(raw_df, is_processed=False)
 
@@ -320,22 +472,8 @@ def main():
     new_df = pd.DataFrame(new_rows)
     logger.info(f"Generated {len(new_df)} new rows")
 
-    # 7. Push ONLY new images to GCP
-    mixed_new = new_df[new_df["form_type"] == MIXED_FORM]
-    cat_new = new_df[new_df["form_type"].isin([CATEGORY_FORM, AMBIGUOUS_FORM])]
-
-    mixed_prefix = Path(f"{GCS_ROOT}/mixed_form")
-    category_prefix = Path(f"{GCS_ROOT}/category_forms")
-
-    if not mixed_new.empty:
-        logger.info(f"Uploading {len(mixed_new)} new mixed form images to GCP...")
-        mixed_new = push_images_to_gcp(mixed_new, mixed_prefix, GCS_BUCKET_NAME, S3_BUCKET_NAME)
-
-    if not cat_new.empty:
-        logger.info(f"Uploading {len(cat_new)} new category form images to GCP...")
-        cat_new = push_images_to_gcp(cat_new, category_prefix, GCS_BUCKET_NAME, S3_BUCKET_NAME)
-
-    new_processed = pd.concat([mixed_new, cat_new], ignore_index=True)
+    # Images stay on S3 (s3_url in parquet). The review app downloads them to VM disk on load.
+    new_processed = new_df
 
     # 8. Merge with existing data
     if existing_df is not None:

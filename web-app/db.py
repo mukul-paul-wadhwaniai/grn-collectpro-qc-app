@@ -153,6 +153,25 @@ def get_all_reviews():
     return results
 
 
+def get_review_counts_by_sample_and_team():
+    """
+    Aggregated review counts per (sample_number, team).
+    Returns list of dicts: sample_number, team, n_reviewed, n_accepted, n_flagged.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT sample_number, team,
+               COUNT(*) AS n_reviewed,
+               SUM(CASE WHEN verdict = 'accept' THEN 1 ELSE 0 END) AS n_accepted,
+               SUM(CASE WHEN verdict = 'flag' THEN 1 ELSE 0 END) AS n_flagged
+        FROM reviews
+        GROUP BY sample_number, team
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ------------------------------------------------------------------
 # Issue Types
 # ------------------------------------------------------------------

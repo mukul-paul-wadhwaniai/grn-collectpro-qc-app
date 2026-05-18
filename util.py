@@ -4,12 +4,16 @@ import logging
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from PIL import Image
-from google.cloud import storage
 from tqdm import tqdm
 import ast
 
+try:
+    from google.cloud import storage
 
-GCS_CLIENT = storage.Client()
+    GCS_CLIENT = storage.Client()
+except Exception as e:
+    GCS_CLIENT = None
+    print(f"Warning: GCS client setup failed ({e})")
 
 try:
     import boto3
@@ -127,6 +131,25 @@ def setup_df(valid_users: list[str], form_names: list[str], project_name: str):
     data_df["data"] = data_df["data"].apply(ast.literal_eval)
 
     return data_df
+
+
+def ensure_s3_image_cached(
+    s3_url: str,
+    cache_dir: Path,
+    bucket_name: str,
+) -> Path | None:
+    """
+    Ensure an S3 object is present on local disk (download if missing).
+    Returns the local file path, or None on failure.
+    """
+    if not s3_url or S3_CLIENT is None:
+        return None
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _, _, filename = parse_s3_url(s3_url)
+    local_path = cache_dir / filename
+    if local_path.exists() and local_path.stat().st_size > 0:
+        return local_path
+    return download_image_from_s3(s3_url, local_path, bucket_name)
 
 
 def download_image_from_s3(s3_url: str, save_path: Path, bucket_name: str):

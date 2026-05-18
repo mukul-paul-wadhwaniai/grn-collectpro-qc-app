@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Review Dashboard – Grain Review</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://unpkg.com/tabulator-tables@6.2.5/dist/css/tabulator_bootstrap5.min.css" rel="stylesheet">
+    <script src="https://unpkg.com/tabulator-tables@6.2.5/dist/js/tabulator.min.js"></script>
     <style>
         @keyframes nav-spin { to { transform: rotate(360deg); } }
         .nav-spinner {
@@ -13,6 +15,31 @@
             border-top-color: #fff;
             border-radius: 50%;
             animation: nav-spin 0.8s linear infinite;
+        }
+        /* Tabulator + fitColumns squeezes headers with ellipsis — show full titles (wrap). */
+        #sample-analytics.tabulator .tabulator-header .tabulator-col .tabulator-col-content .tabulator-col-title,
+        #collector-analytics.tabulator .tabulator-header .tabulator-col .tabulator-col-content .tabulator-col-title {
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
+            word-break: break-word;
+            line-height: 1.25;
+            padding-bottom: 2px;
+        }
+        #sample-analytics.tabulator .tabulator-header .tabulator-col .tabulator-col-content,
+        #collector-analytics.tabulator .tabulator-header .tabulator-col .tabulator-col-content {
+            overflow: visible;
+        }
+        #sample-analytics.tabulator .tabulator-header .tabulator-col,
+        #collector-analytics.tabulator .tabulator-header .tabulator-col {
+            min-height: 3rem;
+        }
+        /* Team review cells: keep 14✓/16 (2⚠) on one line, no ellipsis clip */
+        #sample-analytics.tabulator .tabulator-row .tabulator-cell.team-review-cell {
+            white-space: nowrap;
+            overflow: visible;
+            text-overflow: clip;
+            font-variant-numeric: tabular-nums;
         }
     </style>
 </head>
@@ -25,9 +52,9 @@
         <p id="nav-loader-text" class="text-white text-sm font-medium tracking-wide">Loading sample…</p>
     </div>
 
-    <!-- Header -->
+    <div class="w-[95%] max-w-[95%] mx-auto">
     <header class="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-30">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+        <div class="px-4 sm:px-6 lg:px-10 py-4">
             <div class="flex items-center justify-between">
                 <div>
                     <h1 class="text-2xl font-bold text-gray-900 flex items-center gap-2">
@@ -46,29 +73,214 @@
     </header>
 
     <!-- Main content -->
-    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <main class="px-4 sm:px-6 lg:px-10 py-8">
         <div id="content">
             <p class="text-gray-400 text-center py-16">Loading dashboard…</p>
         </div>
     </main>
+    </div>
 
     <script>
+        let sampleTable = null;
+        let collectorTable = null;
+
         async function loadDashboard() {
             try {
                 const res = await fetch('/api/dashboard');
                 if (!res.ok) throw new Error('Failed to load dashboard');
                 const data = await res.json();
                 renderDashboard(data);
+                await loadAnalyticsTables();
             } catch (e) {
                 document.getElementById('content').innerHTML = `
                     <div class="text-red-600 text-center py-16 text-lg">${e.message}</div>`;
             }
         }
 
+        function shortIsoDisplay(cell) {
+            const v = cell.getValue();
+            if (v == null || v === '') return '—';
+            let s = String(v).trim();
+            if (s.length >= 11 && s[10] === ' ') s = s.slice(0, 10) + 'T' + s.slice(11);
+            const m = s.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
+            if (m) return m[1];
+            return s.length >= 19 ? s.slice(0, 19) : s;
+        }
+
+        function buildSampleColumns() {
+            const fmtSecs = (cell) => {
+                const v = cell.getValue();
+                if (v == null || v === '') return '—';
+                const n = Number(v);
+                if (!Number.isFinite(n)) return '—';
+                if (n >= 3600) return `${(n / 3600).toFixed(2)} h`;
+                if (n >= 60) return `${(n / 60).toFixed(1)} min`;
+                return `${Math.round(n)} s`;
+            };
+            const fmtTeamReview = (team) => (cell) => {
+                const row = cell.getRow().getData();
+                const tot = Number(row.total_reviewable_forms) || 0;
+                const nr = Number(cell.getValue()) || 0;
+                const nf = Number(row[`flagged_${team}`]) || 0;
+                let s = `${nr}/${tot}`;
+                if (nf > 0) s += ` (${nf} ⚠)`;
+                return s;
+            };
+            const cols = [
+                {
+                    title: 'Sample number',
+                    field: 'sample_number',
+                    frozen: true,
+                    minWidth: 108,
+                    hozAlign: 'right',
+                    sorter: 'number',
+                    headerFilter: 'input',
+                    formatter: (cell) => {
+                        const v = cell.getValue();
+                        if (v == null) return '';
+                        return `<a href="/?sample=${v}" class="text-indigo-600 hover:underline font-medium" onclick="showNavLoader(${v})">${v}</a>`;
+                    },
+                },
+                { title: 'Collected by', field: 'collected_by', minWidth: 130, headerFilter: 'input' },
+                {
+                    title: 'Collection time (Δ)',
+                    field: 'collection_time_seconds',
+                    sorter: 'number',
+                    minWidth: 150,
+                    formatter: fmtSecs,
+                    tooltip: 'Last form updated_at − first form created_at (all forms in sample)',
+                },
+                { title: 'Sub-category forms', field: 'n_subcategory_forms', sorter: 'number', minWidth: 150, hozAlign: 'right', headerFilter: 'input' },
+                { title: 'Unique sub-category forms', field: 'n_subcategory_forms_unique', sorter: 'number', minWidth: 190, hozAlign: 'right', headerFilter: 'input' },
+                { title: 'Mixed sample forms', field: 'n_mixed_forms', sorter: 'number', minWidth: 150, hozAlign: 'right', headerFilter: 'input' },
+                { title: 'Additional metadata forms', field: 'n_additional_metadata_forms', sorter: 'number', minWidth: 200, hozAlign: 'right', headerFilter: 'input' },
+                { title: 'First form created', field: 'first_form_created_at', minWidth: 175, headerFilter: 'input', formatter: shortIsoDisplay },
+                { title: 'Last form updated', field: 'last_form_updated_at', minWidth: 175, headerFilter: 'input', formatter: shortIsoDisplay },
+                { title: 'Reviewable forms', field: 'total_reviewable_forms', sorter: 'number', minWidth: 140, hozAlign: 'right', tooltip: 'Unique datapoints in review parquet' },
+                { title: 'Flags (all teams)', field: 'flags_all_teams', sorter: 'number', minWidth: 130, hozAlign: 'right', headerFilter: 'input' },
+                {
+                    title: 'ML',
+                    field: 'reviewed_ML',
+                    sorter: 'number',
+                    minWidth: 120,
+                    hozAlign: 'right',
+                    cssClass: 'team-review-cell',
+                    headerFilter: 'input',
+                    formatter: fmtTeamReview('ML'),
+                    tooltip: 'ML Reviewed / Total Reviewable Forms; (ML Flagged ⚠) if any flags',
+                },
+                {
+                    title: 'Programmes',
+                    field: 'reviewed_Programmes',
+                    sorter: 'number',
+                    minWidth: 130,
+                    hozAlign: 'right',
+                    cssClass: 'team-review-cell',
+                    headerFilter: 'input',
+                    formatter: fmtTeamReview('Programmes'),
+                    tooltip: 'Programmes Reviewed / Total Reviewable Forms; (Programmes Flagged ⚠) if any flags',
+                },
+                {
+                    title: 'Product',
+                    field: 'reviewed_Product',
+                    sorter: 'number',
+                    minWidth: 120,
+                    hozAlign: 'right',
+                    cssClass: 'team-review-cell',
+                    headerFilter: 'input',
+                    formatter: fmtTeamReview('Product'),
+                    tooltip: 'Product Reviewed / Total Reviewable Forms; (Product Flagged ⚠) if any flags',
+                },
+            ];
+            return cols;
+        }
+
+        async function loadAnalyticsTables() {
+            const hint = document.getElementById('analytics-source-hint');
+            const sampleEl = document.getElementById('sample-analytics');
+            const collEl = document.getElementById('collector-analytics');
+            if (!sampleEl || !collEl) return;
+
+            try {
+                const res = await fetch('/api/dashboard/analytics');
+                if (!res.ok) throw new Error('Failed to load analytics');
+                const data = await res.json();
+
+                if (data.source === 'fallback') {
+                    hint.textContent =
+                        'Showing counts from the review parquet only. Run prepare_data.py to emit samples_dashboard.parquet for raw duplicate + metadata form counts.';
+                    hint.classList.remove('hidden');
+                } else {
+                    hint.classList.add('hidden');
+                }
+
+                if (sampleTable) {
+                    sampleTable.destroy();
+                    sampleTable = null;
+                }
+                if (collectorTable) {
+                    collectorTable.destroy();
+                    collectorTable = null;
+                }
+
+                sampleTable = new Tabulator('#sample-analytics', {
+                    data: data.samples,
+                    layout: 'fitData',
+                    height: '80vh',
+                    minHeight: '20vh',
+                    pagination: 'local',
+                    paginationSize: 25,
+                    paginationSizeSelector: [10, 25, 50, 100],
+                    movableColumns: true,
+                    resizableColumns: true,
+                    columnDefaults: {
+                        headerWordWrap: true,
+                    },
+                    initialSort: [{ column: 'sample_number', dir: 'desc' }], // initial sort
+                    columns: buildSampleColumns(),
+                });
+
+                collectorTable = new Tabulator('#collector-analytics', {
+                    data: data.collectors,
+                    layout: 'fitData',
+                    height: '280px',
+                    pagination: 'local',
+                    paginationSize: 15,
+                    movableColumns: true,
+                    resizableColumns: true,
+                    columnDefaults: {
+                        headerWordWrap: true,
+                    },
+                    columns: [
+                        { title: 'Collector (username)', field: 'collector', minWidth: 180, headerFilter: 'input' },
+                        { title: 'Number of samples collected', field: 'n_samples', sorter: 'number', minWidth: 200, hozAlign: 'right', headerFilter: 'input' },
+                        { title: 'Samples with ≥1 flagged review', field: 'n_samples_with_any_flag', sorter: 'number', minWidth: 240, hozAlign: 'right', headerFilter: 'input' },
+                        {
+                            title: 'Median collection time (Δ)',
+                            field: 'median_collection_time_seconds',
+                            sorter: 'number',
+                            minWidth: 220,
+                            formatter: (cell) => {
+                                const v = cell.getValue();
+                                if (v == null || v === '') return '—';
+                                const n = Number(v);
+                                if (!Number.isFinite(n)) return '—';
+                                if (n >= 3600) return `${(n / 3600).toFixed(2)} h`;
+                                if (n >= 60) return `${(n / 60).toFixed(1)} min`;
+                                return `${Math.round(n)} s`;
+                            },
+                        },
+                    ],
+                });
+            } catch (e) {
+                sampleEl.innerHTML = `<p class="text-red-600 text-sm">${e.message}</p>`;
+                collEl.innerHTML = '';
+            }
+        }
+
         function renderDashboard(data) {
             const container = document.getElementById('content');
             container.innerHTML = '';
-
             // ── Grand total ─────────────────────────────────────────
             container.insertAdjacentHTML('beforeend', `
                 <div class="mb-6 text-sm text-gray-500">
@@ -174,6 +386,15 @@
                             <tbody>${sampleRows}</tbody>
                         </table>
                     </div>
+                </div>
+                <div class="mt-10 bg-white rounded-2xl shadow-md border border-gray-200 p-6 overflow-x-auto">
+                    <h2 class="text-lg font-bold text-gray-900 mb-1">Sample analytics</h2>
+                    <p id="analytics-source-hint" class="text-xs text-amber-800 mb-3 hidden"></p>
+                    <div id="sample-analytics" class="min-w-max"></div>
+                </div>
+                <div class="mt-6 bg-white rounded-2xl shadow-md border border-gray-200 p-6 overflow-x-auto">
+                    <h2 class="text-lg font-bold text-gray-900 mb-3">Collector analytics</h2>
+                    <div id="collector-analytics" class="min-w-max"></div>
                 </div>`);
         }
 
