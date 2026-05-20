@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import json
 import secrets
 import sys
 import threading
@@ -32,6 +33,10 @@ SAMPLES_DASHBOARD_FILE = os.environ.get(
     "SAMPLES_DASHBOARD_FILE",
     "/data/temp_dir/samples_dashboard.parquet",
 )
+ADDITIONAL_METADATA_FILE = os.environ.get(
+    "ADDITIONAL_METADATA_FILE",
+    "/data/temp_dir/additional_metadata.parquet",
+)
 STATIC_IMG_DIR = Path("static/images")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "agri-grn-prod-dip-bucket")
 
@@ -53,6 +58,18 @@ STATIC_IMG_DIR.mkdir(parents=True, exist_ok=True)
 MIXED_FORM = "MixedSample_FineProtocol"
 CATEGORY_FORM = "CategorySample_FineProtocol"
 AMBIGUOUS_FORM = "CategorySample_Ambiguous_FineProtocol"
+
+# Additional Metadata form titles are listed in prepare_data.EXTRA_FORM_NAMES.
+# The review UI loads submissions from additional_metadata.parquet (built by prepare_data).
+# When no form exists for a sample that is in the main review parquet, the API still
+# returns one row so reviewers can record accept/flag against this sentinel datapoint_id.
+DEFAULT_ADDITIONAL_METADATA_FORM_LABEL = "Additional metadata fine protocol"
+ADDITIONAL_METADATA_ABSENT_DP_PREFIX = "__no_additional_metadata__"
+
+
+def _additional_metadata_absent_datapoint_id(sample_id: int) -> str:
+    return f"{ADDITIONAL_METADATA_ABSENT_DP_PREFIX}-{int(sample_id)}"
+
 
 # ---------------------------------------------------------------------------
 # Fine Protocol Category Config
@@ -151,14 +168,72 @@ def sanitize(val):
     return val
 
 
+def _display_label(key: str) -> str:
+    s = str(key).replace("_", " ").strip()
+    if not s:
+        return str(key)
+    return s[0].upper() + s[1:] if len(s) > 1 else s.upper()
+
+
+def _flatten_form_payload(data, prefix: str = "", max_depth: int = 12) -> list[dict]:
+    """Nested form `data` JSON → flat {label, value} rows for the review UI."""
+    rows: list[dict] = []
+
+    def scalar_display(v) -> str:
+        if v is None:
+            return "—"
+        try:
+            if pd.isna(v):
+                return "—"
+        except (TypeError, ValueError):
+            pass
+        return str(v)[:4000]
+
+    if max_depth <= 0:
+        return [{"label": prefix or "value", "value": scalar_display(data)}]
+
+    if isinstance(data, dict):
+        for k, v in data.items():
+            lab = f"{prefix} › {_display_label(k)}" if prefix else _display_label(str(k))
+            if isinstance(v, dict):
+                rows.extend(_flatten_form_payload(v, lab, max_depth - 1))
+            elif isinstance(v, list):
+                try:
+                    s = json.dumps(v, default=str)
+                except TypeError:
+                    s = str(v)
+                rows.append({"label": lab, "value": s[:4000]})
+            else:
+                rows.append({"label": lab, "value": scalar_display(v)})
+    else:
+        rows.append({"label": prefix or "Value", "value": scalar_display(data)})
+    return rows
+
+
+def _refresh_sample_numbers_union():
+    """Merge sample IDs from main parquet + additional-metadata export for the dropdown."""
+    global SAMPLE_NUMBERS
+    if df is None or df.empty:
+        base: list[int] = []
+    else:
+        base = sorted(df["sample_number"].dropna().unique().astype(int).tolist())
+    if additional_metadata_df is not None and not additional_metadata_df.empty:
+        extra = additional_metadata_df["sample_number"].dropna().unique().astype(int).tolist()
+        SAMPLE_NUMBERS = sorted(set(base) | set(int(x) for x in extra))
+    else:
+        SAMPLE_NUMBERS = base
+
+
 # ---------------------------------------------------------------------------
 # Auto-sync: reload parquet when the file changes on disk
 # ---------------------------------------------------------------------------
 _data_lock = threading.Lock()
 _parquet_mtime: float = 0.0
 _samples_dashboard_mtime: float = 0.0
+_additional_metadata_mtime: float = 0.0
 df: pd.DataFrame | None = None
 samples_dashboard_df: pd.DataFrame | None = None
+additional_metadata_df: pd.DataFrame | None = None
 SAMPLE_NUMBERS: list[int] = []
 
 
@@ -175,15 +250,11 @@ def _load_data():
         print(f"Loading data from {DATA_FILE} …")
         new_df = pd.read_parquet(DATA_FILE)
         new_df = pre_download_images(new_df)
-        new_samples = sorted(
-            new_df["sample_number"].dropna().unique().astype(int).tolist()
-        )
         new_mtime = os.path.getmtime(DATA_FILE)
         # Atomic swap — only reached if everything above succeeded
         df = new_df
-        SAMPLE_NUMBERS = new_samples
         _parquet_mtime = new_mtime
-        print(f"✅ Loaded {len(df)} rows, {len(SAMPLE_NUMBERS)} samples")
+        print(f"✅ Loaded {len(df)} rows from main parquet")
     except Exception as e:
         print(f"⚠️ RELOAD FAILED: {e} — continuing with previous data")
         import traceback
@@ -195,6 +266,12 @@ def _load_data():
         except OSError:
             pass
     _reload_samples_dashboard()
+    _reload_additional_metadata()
+    _refresh_sample_numbers_union()
+    try:
+        print(f"   → {len(SAMPLE_NUMBERS)} samples in dropdown (incl. additional-metadata-only)")
+    except Exception:
+        pass
 
 
 def _mtime_or_zero(path: str) -> float:
@@ -202,6 +279,22 @@ def _mtime_or_zero(path: str) -> float:
         return os.path.getmtime(path)
     except OSError:
         return 0.0
+
+
+def _reload_additional_metadata():
+    """Load additional_metadata.parquet (Additional Metadata forms) for the review UI."""
+    global additional_metadata_df, _additional_metadata_mtime
+    try:
+        additional_metadata_df = pd.read_parquet(ADDITIONAL_METADATA_FILE)
+        _additional_metadata_mtime = _mtime_or_zero(ADDITIONAL_METADATA_FILE)
+        print(
+            f"✅ Loaded additional metadata ({len(additional_metadata_df)} rows) "
+            f"from {ADDITIONAL_METADATA_FILE}"
+        )
+    except Exception as e:
+        print(f"⚠️ Additional metadata load skipped: {e}")
+        additional_metadata_df = None
+        _additional_metadata_mtime = _mtime_or_zero(ADDITIONAL_METADATA_FILE)
 
 
 def _reload_samples_dashboard():
@@ -236,7 +329,12 @@ def _auto_sync():
     """
     m_main = _mtime_or_zero(DATA_FILE)
     m_dash = _mtime_or_zero(SAMPLES_DASHBOARD_FILE)
-    if m_main == _parquet_mtime and m_dash == _samples_dashboard_mtime:
+    m_am = _mtime_or_zero(ADDITIONAL_METADATA_FILE)
+    if (
+        m_main == _parquet_mtime
+        and m_dash == _samples_dashboard_mtime
+        and m_am == _additional_metadata_mtime
+    ):
         return
 
     # Non-blocking: if another thread is already reloading, serve current data
@@ -247,14 +345,24 @@ def _auto_sync():
     try:
         m_main = _mtime_or_zero(DATA_FILE)
         m_dash = _mtime_or_zero(SAMPLES_DASHBOARD_FILE)
-        if m_main == _parquet_mtime and m_dash == _samples_dashboard_mtime:
+        m_am = _mtime_or_zero(ADDITIONAL_METADATA_FILE)
+        if (
+            m_main == _parquet_mtime
+            and m_dash == _samples_dashboard_mtime
+            and m_am == _additional_metadata_mtime
+        ):
             return
         if m_main != _parquet_mtime:
             print("📦 Parquet file changed on disk — reloading …")
             _load_data()
         else:
-            print("📦 Samples dashboard parquet changed — reloading …")
-            _reload_samples_dashboard()
+            if m_dash != _samples_dashboard_mtime:
+                print("📦 Samples dashboard parquet changed — reloading …")
+                _reload_samples_dashboard()
+            if m_am != _additional_metadata_mtime:
+                print("📦 Additional metadata parquet changed — reloading …")
+                _reload_additional_metadata()
+                _refresh_sample_numbers_union()
     finally:
         _data_lock.release()
 
@@ -326,8 +434,18 @@ def sample_summary(sample_id):
     team = get_team()
 
     try:
-        sample_df = df[df["sample_number"] == sample_id]
-        if sample_df.empty:
+        if df is None or df.empty:
+            sample_df = pd.DataFrame()
+        else:
+            sample_df = df[df["sample_number"] == sample_id]
+
+        am_for_sample = pd.DataFrame()
+        if additional_metadata_df is not None and not additional_metadata_df.empty:
+            am_for_sample = additional_metadata_df[
+                additional_metadata_df["sample_number"] == sample_id
+            ]
+
+        if sample_df.empty and am_for_sample.empty:
             return jsonify({"error": "Sample not found"}), 404
 
         # --- Mixed form ---
@@ -442,6 +560,38 @@ def sample_summary(sample_id):
             "categories_expected": len(ALL_CATEGORIES),
         }
 
+        # --- Additional metadata forms (from pipeline export; not in main parquet) ---
+        additional_metadata_out = []
+        if not am_for_sample.empty:
+            for _, am_row in am_for_sample.iterrows():
+                raw_dp = am_row.get("datapoint_id")
+                dp = str(raw_dp) if pd.notna(raw_dp) else None
+                raw_json = am_row.get("data_json")
+                try:
+                    payload = json.loads(raw_json) if raw_json and pd.notna(raw_json) else {}
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+                additional_metadata_out.append({
+                    "datapoint_id": dp,
+                    "form_name": sanitize(am_row.get("form_name")),
+                    "user": sanitize(am_row.get("user")),
+                    "created_at": sanitize(am_row.get("created_at")),
+                    "updated_at": sanitize(am_row.get("updated_at")),
+                    "fields": _flatten_form_payload(payload),
+                    "empty_state": False,
+                })
+
+        if not additional_metadata_out and not sample_df.empty:
+            additional_metadata_out.append({
+                "datapoint_id": _additional_metadata_absent_datapoint_id(sample_id),
+                "form_name": DEFAULT_ADDITIONAL_METADATA_FORM_LABEL,
+                "user": None,
+                "created_at": None,
+                "updated_at": None,
+                "fields": [],
+                "empty_state": True,
+            })
+
         # --- Reviews for this team ---
         reviews = get_reviews_for_sample(team, sample_id)
 
@@ -454,6 +604,7 @@ def sample_summary(sample_id):
             },
             "categories": all_cat_list,
             "diagnostics": diagnostics,
+            "additional_metadata": additional_metadata_out,
             "reviews": reviews,
         })
     except Exception as e:

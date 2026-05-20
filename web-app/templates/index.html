@@ -167,6 +167,30 @@
             }
         }
 
+        function isHiddenAdditionalMetaField(label) {
+            const segs = String(label || '')
+                .split('›')
+                .map(s => s.trim().toLowerCase().replace(/_/g, ' '));
+            return segs.some(s => s === 'sample number');
+        }
+
+        /** API rows plus client-side fallback when the server omits a placeholder for “no AM form”. */
+        function effectiveAdditionalMetadataEntries(data) {
+            let entries = Array.isArray(data.additional_metadata) ? data.additional_metadata.slice() : [];
+            const sid = data.sample_id;
+            if (entries.length === 0 && sid != null) {
+                entries.push({
+                    datapoint_id: `__no_additional_metadata__-${sid}`,
+                    form_name: 'Additional metadata fine protocol',
+                    user: null,
+                    created_at: null,
+                    fields: [],
+                    empty_state: true,
+                });
+            }
+            return entries;
+        }
+
         // ── Render Dashboard ────────────────────────────────────────────
         function renderDashboard(data) {
             document.getElementById('placeholder').classList.add('hidden');
@@ -177,13 +201,79 @@
             renderMetadataBanner(dash, data);
             renderDiagnostics(dash, data.diagnostics);
             renderMixedImages(dash, data.mixed.images, data.mixed.datapoint_id);
+            renderAdditionalMetadataSection(dash, data);
             renderCategoryGroups(dash, data.categories);
+        }
+
+        // ── Additional metadata (fine protocol) ──────────────────────────
+        function renderAdditionalMetadataSection(container, data) {
+            const entries = effectiveAdditionalMetadataEntries(data);
+            if (entries.length === 0) return;
+
+            let delay = 175;
+            let blocks = '';
+            entries.forEach((ent, idx) => {
+                const dpId = ent.datapoint_id || '';
+                const isEmptyState = Boolean(ent.empty_state);
+                const fnameRaw = ent.form_name || 'Additional metadata';
+                const fname = escapeHtml(fnameRaw);
+                const rev = dpId ? currentReviews[dpId] : null;
+                let revInd = '';
+                if (rev) {
+                    revInd = rev.verdict === 'accept'
+                        ? '<span class="text-green-600 text-xs font-bold" title="Accepted">✓</span>'
+                        : '<span class="text-red-600 text-xs font-bold" title="Flagged">✗</span>';
+                }
+                let rowsHtml = '';
+                (ent.fields || []).forEach(f => {
+                    if (isHiddenAdditionalMetaField(f.label)) return;
+                    rowsHtml += `
+                        <div class="flex flex-wrap gap-x-3 gap-y-1 text-sm py-1.5 border-b border-gray-100 last:border-0">
+                            <span class="text-gray-500 font-medium shrink-0 max-w-[min(40vw,14rem)]">${escapeHtml(f.label)}</span>
+                            <span class="text-gray-900 break-words">${escapeHtml(f.value)}</span>
+                        </div>`;
+                });
+                const metaSubtitle = isEmptyState
+                    ? '<p class="text-xs text-gray-500 mb-3">No submission on file for this sample.</p>'
+                    : `<p class="text-xs text-gray-500 mb-3">${escapeHtml(ent.user || '')} · ${formatIST(ent.created_at)}</p>`;
+                const innerBox = isEmptyState
+                    ? `<p class="text-sm text-gray-500 italic">No additional metadata form was submitted for this sample. You can still accept or flag below (e.g. confirm absence is expected).</p>`
+                    : (rowsHtml || '<p class="text-sm text-gray-400">No fields in this form payload.</p>');
+                const reviewHtml = dpId ? reviewPanelHtml(dpId, fnameRaw, '') : '';
+                blocks += `
+                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-5 card-enter" style="animation-delay:${delay + idx * 40}ms">
+                    <h2 class="text-lg font-bold text-gray-900 mb-1 flex flex-wrap items-center gap-2">
+                        📝 ${fname}
+                        <span id="review-indicator-${dpId}" class="ml-1">${revInd}</span>
+                    </h2>
+                    ${metaSubtitle}
+                    <div class="rounded-xl bg-gray-50 border border-gray-100 p-3 max-h-[min(60vh,480px)] overflow-y-auto">
+                        ${innerBox}
+                    </div>
+                    ${reviewHtml}
+                </div>`;
+            });
+
+            container.insertAdjacentHTML('beforeend', `
+                <div class="card-enter" style="animation-delay:170ms">
+                    <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3">Additional metadata forms</h3>
+                    <div class="space-y-4">${blocks}</div>
+                </div>`);
         }
 
         // ── Metadata Banner ─────────────────────────────────────────────
         function renderMetadataBanner(container, data) {
             const info = data.mixed?.info;
+            const hasMetaForms = effectiveAdditionalMetadataEntries(data).length > 0;
             if (!info) {
+                if (hasMetaForms) {
+                    container.insertAdjacentHTML('beforeend', `
+                        <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-amber-900 text-sm">
+                            <strong class="font-semibold">Sample #${data.sample_id}</strong> — no Mixed form row in the review parquet yet.
+                            Additional metadata for this sample is shown in the section below.
+                        </div>`);
+                    return;
+                }
                 container.insertAdjacentHTML('beforeend', `
                     <div class="bg-red-50 border border-red-200 rounded-2xl p-5 text-red-700 font-medium">
                         ⚠️ No mixed form found for Sample #${data.sample_id}

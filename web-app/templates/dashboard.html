@@ -34,6 +34,51 @@
         #collector-analytics.tabulator .tabulator-header .tabulator-col {
             min-height: 3rem;
         }
+        /* Pin first two analytics columns — horizontal scroll must live INSIDE
+           .tabulator-tableholder (not the outer card), or sticky won't stick. */
+        :root {
+            --sa-stick-w1: 128px;
+        }
+        #sample-analytics.tabulator {
+            width: 100%;
+            max-width: 100%;
+        }
+        #sample-analytics.tabulator .tabulator-tableholder {
+            overflow-x: auto !important;
+            overflow-y: auto !important;
+            max-width: 100%;
+        }
+        /* Body cells — sit above scrolling cells when overlapping */
+        #sample-analytics.tabulator .tabulator-row .tabulator-cell.sa-stick-c1,
+        #sample-analytics.tabulator .tabulator-header .tabulator-col.sa-stick-c1,
+        #sample-analytics.tabulator .tabulator-header-filter .tabulator-col.sa-stick-c1 {
+            position: sticky !important;
+            left: 0 !important;
+            z-index: 22;
+            box-sizing: border-box;
+            background-color: #fff !important;
+        }
+        #sample-analytics.tabulator .tabulator-row .tabulator-cell.sa-stick-c2,
+        #sample-analytics.tabulator .tabulator-header .tabulator-col.sa-stick-c2,
+        #sample-analytics.tabulator .tabulator-header-filter .tabulator-col.sa-stick-c2 {
+            position: sticky !important;
+            left: var(--sa-stick-w1) !important;
+            z-index: 21;
+            box-sizing: border-box;
+            background-color: #fff !important;
+            box-shadow: 6px 0 12px -6px rgba(0, 0, 0, 0.12);
+            border-right: 1px solid #e9ecef;
+        }
+        #sample-analytics.tabulator .tabulator-header .tabulator-col.sa-stick-c1,
+        #sample-analytics.tabulator .tabulator-header .tabulator-col.sa-stick-c2 {
+            z-index: 32;
+            background-color: rgba(249, 250, 251, 1) !important;
+        }
+        #sample-analytics.tabulator .tabulator-header-filter .tabulator-col.sa-stick-c1,
+        #sample-analytics.tabulator .tabulator-header-filter .tabulator-col.sa-stick-c2 {
+            z-index: 31;
+            background-color: rgba(249, 250, 251, 1) !important;
+        }
         /* Team review cells: keep 14✓/16 (2⚠) on one line, no ellipsis clip */
         #sample-analytics.tabulator .tabulator-row .tabulator-cell.team-review-cell {
             white-space: nowrap;
@@ -130,8 +175,11 @@
                 {
                     title: 'Sample number',
                     field: 'sample_number',
-                    frozen: true,
+                    width: 128,
+                    widthShrink: false,
                     minWidth: 108,
+                    resizable: false,
+                    cssClass: 'sa-stick-c1',
                     hozAlign: 'right',
                     sorter: 'number',
                     headerFilter: 'input',
@@ -141,7 +189,16 @@
                         return `<a href="/?sample=${v}" class="text-indigo-600 hover:underline font-medium" onclick="showNavLoader(${v})">${v}</a>`;
                     },
                 },
-                { title: 'Collected by', field: 'collected_by', minWidth: 130, headerFilter: 'input' },
+                {
+                    title: 'Collected by',
+                    field: 'collected_by',
+                    width: 156,
+                    widthShrink: false,
+                    minWidth: 130,
+                    resizable: false,
+                    cssClass: 'sa-stick-c2',
+                    headerFilter: 'input',
+                },
                 {
                     title: 'Collection time (Δ)',
                     field: 'collection_time_seconds',
@@ -152,6 +209,15 @@
                 },
                 { title: 'Sub-category forms', field: 'n_subcategory_forms', sorter: 'number', minWidth: 150, hozAlign: 'right', headerFilter: 'input' },
                 { title: 'Unique sub-category forms', field: 'n_subcategory_forms_unique', sorter: 'number', minWidth: 190, hozAlign: 'right', headerFilter: 'input' },
+                {
+                    title: 'Duplicate Forms',
+                    field: 'n_subcategory_forms_difference',
+                    sorter: 'number',
+                    minWidth: 120,
+                    hozAlign: 'right',
+                    headerFilter: 'input',
+                    tooltip: 'Sub-category forms − unique sub-category forms (extra / duplicate submissions in raw data)',
+                },
                 { title: 'Mixed sample forms', field: 'n_mixed_forms', sorter: 'number', minWidth: 150, hozAlign: 'right', headerFilter: 'input' },
                 { title: 'Additional metadata forms', field: 'n_additional_metadata_forms', sorter: 'number', minWidth: 200, hozAlign: 'right', headerFilter: 'input' },
                 { title: 'First form created', field: 'first_form_created_at', minWidth: 175, headerFilter: 'input', formatter: shortIsoDisplay },
@@ -223,13 +289,20 @@
                     collectorTable = null;
                 }
 
+                const sampleRowsEnriched = (data.samples || []).map((r) => ({
+                    ...r,
+                    n_subcategory_forms_difference:
+                        (Number(r.n_subcategory_forms) || 0) -
+                        (Number(r.n_subcategory_forms_unique) || 0),
+                }));
+
                 sampleTable = new Tabulator('#sample-analytics', {
-                    data: data.samples,
+                    data: sampleRowsEnriched,
                     layout: 'fitData',
                     height: '80vh',
                     minHeight: '20vh',
                     pagination: 'local',
-                    paginationSize: 25,
+                    paginationSize: 50,
                     paginationSizeSelector: [10, 25, 50, 100],
                     movableColumns: true,
                     resizableColumns: true,
@@ -371,26 +444,29 @@
                     </tr>`;
             });
 
+            // Place this lines within container.insertAdjacentHTML('beforeend', `
+            // <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
+            //         <h2 class="text-lg font-bold text-gray-900 mb-4">Per-Sample Breakdown</h2>
+            //         <div class="overflow-x-auto">
+            //             <table class="w-full text-sm">
+            //                 <thead>
+            //                     <tr class="border-b border-gray-200 text-gray-500 text-xs uppercase tracking-wider">
+            //                         <th class="py-2 px-3 text-left">Sample</th>
+            //                         <th class="py-2 px-3 text-center">Forms</th>
+            //                         ${teamHeaders}
+            //                     </tr>
+            //                 </thead>
+            //                 <tbody>${sampleRows}</tbody>
+            //             </table>
+            //         </div>
+            //     </div>
+
             container.insertAdjacentHTML('beforeend', `
-                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
-                    <h2 class="text-lg font-bold text-gray-900 mb-4">Per-Sample Breakdown</h2>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-sm">
-                            <thead>
-                                <tr class="border-b border-gray-200 text-gray-500 text-xs uppercase tracking-wider">
-                                    <th class="py-2 px-3 text-left">Sample</th>
-                                    <th class="py-2 px-3 text-center">Forms</th>
-                                    ${teamHeaders}
-                                </tr>
-                            </thead>
-                            <tbody>${sampleRows}</tbody>
-                        </table>
-                    </div>
-                </div>
-                <div class="mt-10 bg-white rounded-2xl shadow-md border border-gray-200 p-6 overflow-x-auto">
+                
+                <div class="mt-10 bg-white rounded-2xl shadow-md border border-gray-200 p-6">
                     <h2 class="text-lg font-bold text-gray-900 mb-1">Sample analytics</h2>
                     <p id="analytics-source-hint" class="text-xs text-amber-800 mb-3 hidden"></p>
-                    <div id="sample-analytics" class="min-w-max"></div>
+                    <div id="sample-analytics" class="w-full min-w-0"></div>
                 </div>
                 <div class="mt-6 bg-white rounded-2xl shadow-md border border-gray-200 p-6 overflow-x-auto">
                     <h2 class="text-lg font-bold text-gray-900 mb-3">Collector analytics</h2>

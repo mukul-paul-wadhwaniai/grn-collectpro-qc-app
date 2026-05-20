@@ -1,3 +1,4 @@
+import json
 import os
 import pandas as pd
 from pathlib import Path
@@ -76,6 +77,7 @@ def extract_sample_number(data) -> int | None:
 # Output directory for timestamped parquet archives
 OUTPUT_DIR = Path("/data/temp_dir") # NOTE: this is a temporary directory for testing
 PROCESSED_SYMLINK = OUTPUT_DIR / "latest.parquet"
+ADDITIONAL_METADATA_SYMLINK = OUTPUT_DIR / "additional_metadata.parquet"
 
 
 def validate_and_dedup(df: pd.DataFrame, is_processed=False):
@@ -277,6 +279,68 @@ def write_samples_dashboard_parquet(df: pd.DataFrame, output_dir: Path) -> Path:
     return out_path
 
 
+def build_additional_metadata_export(
+    raw_df: pd.DataFrame,
+    metadata_form_names: list[str],
+) -> pd.DataFrame:
+    """
+    Rows for Additional Metadata (and similar) forms — used by the review UI.
+    Serialized `data` JSON per datapoint.
+    """
+    cols = [
+        "sample_number",
+        "datapoint_id",
+        "form_name",
+        "user",
+        "created_at",
+        "updated_at",
+        "data_json",
+    ]
+    if raw_df.empty or not metadata_form_names:
+        return pd.DataFrame(columns=cols)
+
+    meta_set = set(metadata_form_names)
+    m = raw_df[raw_df["form_name"].isin(meta_set)].copy()
+    if m.empty:
+        return pd.DataFrame(columns=cols)
+
+    m["data_json"] = m["data"].apply(lambda d: json.dumps(d, default=str))
+    out = m[
+        ["sample_number", "datapoint_id", "form_name", "username", "created_at", "updated_at"]
+    ].rename(columns={"username": "user"})
+    out["data_json"] = m["data_json"].values
+    out = out.sort_values(["sample_number", "created_at"]).reset_index(drop=True)
+    return out
+
+
+def write_additional_metadata_parquet(df: pd.DataFrame, output_dir: Path) -> Path | None:
+    """Write timestamped parquet and atomically update additional_metadata symlink."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if df.empty:
+        empty_path = output_dir / "_additional_metadata_empty.parquet"
+        df.to_parquet(empty_path, index=False)
+        tmp_link = output_dir / f".additional_meta_{os.getpid()}.tmp"
+        if tmp_link.is_symlink() or tmp_link.exists():
+            tmp_link.unlink()
+        tmp_link.symlink_to(empty_path)
+        tmp_link.rename(ADDITIONAL_METADATA_SYMLINK)
+        logger.info("✅ Additional metadata export (empty) symlink updated")
+        return empty_path
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = output_dir / f"additional_metadata_{timestamp}.parquet"
+    df.to_parquet(out_path, index=False)
+
+    tmp_link = output_dir / f".additional_meta_{os.getpid()}.tmp"
+    if tmp_link.is_symlink() or tmp_link.exists():
+        tmp_link.unlink()
+    tmp_link.symlink_to(out_path)
+    tmp_link.rename(ADDITIONAL_METADATA_SYMLINK)
+    logger.info(f"✅ Additional metadata saved → {out_path.name} (symlink updated)")
+    return out_path
+
+
 def process_sample_group(sample_number, sample_df, skip_datapoint_ids=None):
     """
     Processes all forms associated with a single sample_number.
@@ -410,6 +474,9 @@ def main():
     dashboard_df = build_samples_dashboard_summary(raw_full, EXTRA_FORM_NAMES)
     write_samples_dashboard_parquet(dashboard_df, OUTPUT_DIR)
 
+    meta_export_df = build_additional_metadata_export(raw_full, EXTRA_FORM_NAMES)
+    write_additional_metadata_parquet(meta_export_df, OUTPUT_DIR)
+
     # 2c. Pipeline subset: only image-bearing protocol forms
     raw_df = raw_full[raw_full["form_name"].isin(FORM_NAMES)].copy()
 
@@ -422,11 +489,19 @@ def main():
     
     if latest_parquet:
         existing_df = pd.read_parquet(latest_parquet)
-        already_processed_ids = set(existing_df['datapoint_id'].unique())
+        already_processed_ids = set(existing_df["datapoint_id"].unique())
 
-        incomplete_ids = set(existing_df[existing_df['s3_url'].isna()]['datapoint_id'].unique())
-        existing_df = existing_df[~existing_df['datapoint_id'].isin(incomplete_ids)]
-        already_processed_ids -= incomplete_ids
+        if "s3_url" in existing_df.columns:
+            incomplete_ids = set(
+                existing_df[existing_df["s3_url"].isna()]["datapoint_id"].unique()
+            )
+            existing_df = existing_df[~existing_df["datapoint_id"].isin(incomplete_ids)]
+            already_processed_ids -= incomplete_ids
+        else:
+            logger.warning(
+                "Existing latest parquet has no 's3_url' column (legacy export) — "
+                "not dropping rows with missing URLs."
+            )
 
         logger.info(
             f"Loaded {latest_parquet.name}: "
