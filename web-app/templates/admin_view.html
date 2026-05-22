@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grain Review — Admin (all teams)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .card-enter { animation: fadeInUp 0.3s ease-out forwards; opacity: 0; }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .img-zoomable { cursor: zoom-in; transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .img-zoomable:hover { transform: scale(1.02); box-shadow: 0 8px 25px rgba(0,0,0,0.15); }
+        .cat-bar { transition: all 0.15s ease; }
+        .cat-bar.exists { cursor: pointer; }
+        .cat-bar.exists:hover { background-color: #f9fafb; }
+        .cat-bar.missing { opacity: 0.45; }
+        .expand-panel { max-height: 0; overflow: hidden; transition: max-height 0.35s ease; }
+        .expand-panel.open { max-height: 1500px; }
+        .chevron { transition: transform 0.2s ease; display: inline-block; }
+        .chevron.open { transform: rotate(90deg); }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+    <div class="w-[95%] max-w-[95%] mx-auto">
+    <header class="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-30">
+        <div class="px-4 sm:px-6 lg:px-8 py-4">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-900 flex flex-wrap items-center gap-2">
+                        <span class="text-3xl">🌾</span> Admin view
+                        <span class="text-xs font-semibold uppercase tracking-wide bg-violet-100 text-violet-800 px-2 py-1 rounded-full">All teams · Read-only</span>
+                    </h1>
+                    <p class="text-xs text-gray-500 mt-1 max-w-xl">
+                        Consolidated reviews from ML, Programmes, and Product. Sign in as a team user to submit or change reviews.
+                    </p>
+                </div>
+                <div class="flex flex-wrap items-center gap-3">
+                    <label class="text-sm font-medium text-gray-700">Sample</label>
+                    <select id="sample-select" class="rounded-lg border-gray-300 shadow-sm text-sm px-3 py-2 border min-w-[100px]">
+                        <option value="">— Select —</option>
+                        {% for sid in sample_numbers %}
+                        <option value="{{ sid }}">{{ sid }}</option>
+                        {% endfor %}
+                    </select>
+                    <button id="btn-go" onclick="loadSummary()" class="bg-violet-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-violet-700 transition shadow">
+                        Go
+                    </button>
+                    <a href="/dashboard" class="text-sm text-violet-600 hover:text-violet-800 font-medium">Dashboard</a>
+                    <a href="/logout" class="text-sm text-gray-400 hover:text-gray-600 transition" title="Logout">Logout</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div id="placeholder" class="flex flex-col items-center justify-center py-24 text-gray-400">
+            <svg class="w-16 h-16 mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+            </svg>
+            <p class="text-lg font-medium">Select a sample to see all teams’ reviews</p>
+        </div>
+        <div id="dashboard" class="hidden space-y-6"></div>
+    </main>
+    </div>
+
+    <div id="modal-backdrop" class="fixed inset-0 bg-black/80 z-50 hidden items-center justify-center p-4" onclick="closeModal()">
+        <img id="modal-image" src="" alt="Full resolution"
+             class="max-w-full max-h-[90vh] rounded-xl shadow-2xl object-contain bg-white"
+             onclick="event.stopPropagation()">
+    </div>
+
+    <script>
+        const TEAMS_LIST = {{ teams | tojson }};
+        const supercatOrder  = {{ supercat_order | tojson }};
+        const supercatLabels = {{ supercat_labels | tojson }};
+        const supercatGroups = {{ supercat_groups | tojson }};
+        const allCategories  = {{ all_categories | tojson }};
+        const fineAmbiguous  = new Set({{ fine_ambiguous | tojson }});
+
+        let currentSampleId = null;
+        /** { datapoint_id: [ { team, verdict, issue_types, remark, reviewer_username, updated_at }, ... ] } */
+        let reviewsByDatapoint = {};
+
+        function escapeHtml(s) {
+            if (!s) return '';
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                    .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+        }
+
+        function formatIST(dateStr) {
+            if (!dateStr) return 'N/A';
+            try {
+                const d = new Date(dateStr);
+                return d.toLocaleString('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    day: '2-digit', month: '2-digit', year: '2-digit',
+                    hour: '2-digit', minute: '2-digit', hour12: true
+                });
+            } catch { return dateStr; }
+        }
+
+        function pretty(s) {
+            if (!s) return '';
+            return s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
+
+        function downloadBtn(imgPath) {
+            if (!imgPath) return '';
+            const filename = imgPath.split('/').pop();
+            return `<a href="/download/${filename}"
+                       class="inline-flex items-center gap-1 text-sm text-violet-600 hover:text-violet-800 font-medium transition"
+                       title="Download full-res image">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"/>
+                        </svg> Download
+                    </a>`;
+        }
+
+        function statusBadge(ok, label) {
+            if (ok) return `<span class="inline-flex items-center gap-1 text-green-700 bg-green-100 text-xs font-medium px-2 py-0.5 rounded-full">✅ ${escapeHtml(label)}</span>`;
+            return `<span class="inline-flex items-center gap-1 text-red-700 bg-red-100 text-xs font-medium px-2 py-0.5 rounded-full">❌ ${escapeHtml(label)}</span>`;
+        }
+
+        function isHiddenAdditionalMetaField(label) {
+            const segs = String(label || '')
+                .split('›')
+                .map(s => s.trim().toLowerCase().replace(/_/g, ' '));
+            return segs.some(s => s === 'sample number');
+        }
+
+        function effectiveAdditionalMetadataEntries(data) {
+            let entries = Array.isArray(data.additional_metadata) ? data.additional_metadata.slice() : [];
+            const sid = data.sample_id;
+            if (entries.length === 0 && sid != null) {
+                entries.push({
+                    datapoint_id: `__no_additional_metadata__-${sid}`,
+                    form_name: 'Additional metadata fine protocol',
+                    user: null,
+                    created_at: null,
+                    fields: [],
+                    empty_state: true,
+                });
+            }
+            return entries;
+        }
+
+        function adminSummaryChips(dpId) {
+            const list = reviewsByDatapoint[dpId] || [];
+            if (!list.length)
+                return '<span class="text-[10px] text-gray-400">No reviews</span>';
+            return list.map(r => {
+                const sym = r.verdict === 'accept' ? '✓' : '✗';
+                const cls = r.verdict === 'accept' ? 'text-green-600' : 'text-red-600';
+                const t = escapeHtml(r.team || '');
+                const short = r.team === 'Programmes' ? 'Prog' : (r.team === 'Product' ? 'Prod' : (r.team || ''));
+                return `<span class="${cls} text-[10px] font-bold" title="${t}">${escapeHtml(short)} ${sym}</span>`;
+            }).join('<span class="text-gray-300 mx-0.5">|</span>');
+        }
+
+        /** Read-only comparison for one datapoint across TEAMS_LIST order */
+        function adminReviewsHtml(datapointId) {
+            const listRaw = reviewsByDatapoint[datapointId] || [];
+            const byTeam = {};
+            listRaw.forEach(r => { byTeam[r.team] = r; });
+
+            let cols = '';
+            TEAMS_LIST.forEach(tm => {
+                const r = byTeam[tm];
+                if (!r) {
+                    cols += `
+                        <div class="flex-1 min-w-[160px] rounded-lg border border-dashed border-gray-200 bg-gray-50/80 p-3">
+                            <div class="text-xs font-bold text-gray-400 uppercase mb-2">${escapeHtml(tm)}</div>
+                            <p class="text-xs text-gray-400">No review yet</p>
+                        </div>`;
+                    return;
+                }
+                const v = r.verdict === 'accept';
+                const badge = v
+                    ? '<span class="text-[10px] font-bold uppercase text-green-700 bg-green-100 px-2 py-0.5 rounded">Accept</span>'
+                    : '<span class="text-[10px] font-bold uppercase text-red-700 bg-red-100 px-2 py-0.5 rounded">Flag</span>';
+                const who = r.reviewer_username ? escapeHtml(r.reviewer_username) : '—';
+                const issues = (r.issue_types || []).length
+                    ? r.issue_types.map(x => escapeHtml(x)).join(', ')
+                    : '—';
+                const remark = r.remark ? escapeHtml(r.remark) : '—';
+                cols += `
+                    <div class="flex-1 min-w-[160px] rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
+                        <div class="text-xs font-bold text-gray-700 uppercase mb-1 flex justify-between items-center gap-1 flex-wrap">
+                            <span>${escapeHtml(tm)}</span>
+                            ${badge}
+                        </div>
+                        <div class="text-[11px] text-gray-500 mb-2">Logged-in account: <span class="text-gray-800">${who}</span></div>
+                        <div class="text-xs text-gray-600"><span class="font-semibold text-gray-500">Issues:</span> ${issues}</div>
+                        <div class="text-xs text-gray-600 mt-1"><span class="font-semibold text-gray-500">Remark:</span> ${remark}</div>
+                        <div class="text-[10px] text-gray-400 mt-2 border-t border-gray-100 pt-1">${formatIST(r.updated_at)}</div>
+                    </div>`;
+            });
+
+            return `
+                <div class="border-t border-gray-200 pt-3 mt-3">
+                    <div class="text-xs font-bold text-gray-500 uppercase mb-2">All teams (read-only)</div>
+                    <div class="flex flex-wrap gap-3">${cols}</div>
+                </div>`;
+        }
+
+        async function loadSummary() {
+            const sampleId = document.getElementById('sample-select').value;
+            if (!sampleId) return alert('Select a Sample ID first.');
+
+            const btn = document.getElementById('btn-go');
+            btn.textContent = 'Loading…';
+            btn.disabled = true;
+
+            try {
+                const summaryRes = await fetch(`/api/sample/${sampleId}/summary`);
+                if (!summaryRes.ok) {
+                    const err = await summaryRes.json();
+                    throw new Error(err.error || 'Failed to load');
+                }
+                const data = await summaryRes.json();
+                currentSampleId = parseInt(sampleId);
+                reviewsByDatapoint = data.reviews_by_team || {};
+                renderDashboard(data);
+            } catch (e) {
+                alert(e.message);
+            } finally {
+                btn.textContent = 'Go';
+                btn.disabled = false;
+            }
+        }
+
+        function renderDashboard(data) {
+            document.getElementById('placeholder').classList.add('hidden');
+            const dash = document.getElementById('dashboard');
+            dash.classList.remove('hidden');
+            dash.innerHTML = '';
+
+            renderMetadataBanner(dash, data);
+            renderDiagnostics(dash, data.diagnostics);
+            renderMixedImagesAdmin(dash, data.mixed.images, data.mixed.datapoint_id);
+            renderAdditionalMetadataAdmin(dash, data);
+            renderCategoryGroupsAdmin(dash, data.categories);
+        }
+
+        function renderMetadataBanner(container, data) {
+            const info = data.mixed?.info;
+            const hasMetaForms = effectiveAdditionalMetadataEntries(data).length > 0;
+            if (!info) {
+                if (hasMetaForms) {
+                    container.insertAdjacentHTML('beforeend', `
+                        <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-amber-900 text-sm">
+                            <strong class="font-semibold">Sample #${data.sample_id}</strong> — no Mixed form row in the review parquet yet.
+                            Additional metadata for this sample is shown in the section below.
+                        </div>`);
+                    return;
+                }
+                container.insertAdjacentHTML('beforeend', `
+                    <div class="bg-red-50 border border-red-200 rounded-2xl p-5 text-red-700 font-medium">
+                        ⚠️ No mixed form found for Sample #${data.sample_id}
+                    </div>`);
+                return;
+            }
+            const moisture = (info.moisture || []).map(v => v ?? '-').join(', ');
+            container.insertAdjacentHTML('beforeend', `
+                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-5 card-enter">
+                    <h2 class="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
+                        📋 Sample #${data.sample_id}
+                    </h2>
+                    <div class="flex flex-wrap gap-x-8 gap-y-2 text-sm text-gray-700">
+                        <div><span class="font-semibold text-gray-900">User:</span> ${escapeHtml(info.user) || 'Unknown'}</div>
+                        <div><span class="font-semibold text-gray-900">Created:</span> ${formatIST(info.created_at)}</div>
+                        <div><span class="font-semibold text-gray-900">Updated:</span> ${formatIST(info.updated_at)}</div>
+                        <div><span class="font-semibold text-gray-900">Total Weight:</span> ${info.sample_weight ?? 'N/A'}g</div>
+                        <div><span class="font-semibold text-gray-900">Moisture:</span> ${moisture}</div>
+                        <div><span class="font-semibold text-gray-900">Background:</span> ${escapeHtml(info.background) || 'N/A'}</div>
+                        <div><span class="font-semibold text-gray-900">Variety:</span> ${escapeHtml(info.variety) || 'N/A'}</div>
+                    </div>
+                </div>`);
+        }
+
+        function renderDiagnostics(container, diag) {
+            const wDiffAbs = Math.abs(diag.weight_diff);
+            const wDiffColor = wDiffAbs > 1 ? 'text-red-600 font-bold' : 'text-green-600';
+            const missingRefs = diag.missing_mixed_refs.length > 0
+                ? `<span class="text-red-600 font-medium">Missing: ${diag.missing_mixed_refs.map(pretty).join(', ')}</span>`
+                : '<span class="text-green-600">All present</span>';
+
+            container.insertAdjacentHTML('beforeend', `
+                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-5 card-enter" style="animation-delay:50ms">
+                    <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3">Diagnostics</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Mixed Form</div>
+                            ${statusBadge(diag.mixed_exists, diag.mixed_exists ? 'Found' : 'Missing')}
+                        </div>
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Mixed Images</div>
+                            <div class="font-semibold">${diag.mixed_images_found} / ${diag.mixed_images_expected}</div>
+                            <div class="text-xs mt-0.5">${missingRefs}</div>
+                        </div>
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Weight Check</div>
+                            <div class="font-semibold">${diag.total_weight ?? 0}g total vs ${diag.sum_category_weights}g sum</div>
+                            <div class="text-xs mt-0.5 ${wDiffColor}">Δ = ${diag.weight_diff}g (${diag.weight_diff_pct}%)</div>
+                        </div>
+                        <div class="bg-gray-50 rounded-xl p-3">
+                            <div class="text-gray-500 text-xs font-medium uppercase mb-1">Categories</div>
+                            <div class="font-semibold">${diag.categories_collected} / ${diag.categories_expected} collected</div>
+                        </div>
+                    </div>
+                </div>`);
+        }
+
+        function renderMixedImagesAdmin(container, images, mixedDatapointId) {
+            let cardsHtml = '';
+            images.forEach((img, idx) => {
+                const refLabel = pretty(img.ref);
+                if (img.has_image) {
+                    cardsHtml += `
+                        <div class="bg-white rounded-xl shadow border border-gray-200 overflow-hidden card-enter" style="animation-delay:${100 + idx*50}ms">
+                            <div class="relative">
+                                <img src="${img.image_path}" loading="lazy"
+                                     class="img-zoomable w-full object-contain bg-gray-100"
+                                     style="max-height: 220px;"
+                                     onclick="openModal('${img.image_path}')"
+                                     onerror="this.src='https://via.placeholder.com/400x300?text=Load+Failed'">
+                                <span class="absolute top-2 left-2 bg-violet-600 text-white text-xs font-semibold uppercase px-2 py-0.5 rounded-full shadow">
+                                    ${escapeHtml(refLabel)}
+                                </span>
+                            </div>
+                            <div class="px-3 py-2 border-t border-gray-100 flex justify-end">
+                                ${downloadBtn(img.image_path)}
+                            </div>
+                </div>`;
+                } else {
+                    cardsHtml += `
+                        <div class="bg-gray-100 rounded-xl shadow border-2 border-dashed border-red-300 overflow-hidden flex flex-col items-center justify-center card-enter"
+                             style="min-height:180px; animation-delay:${100 + idx*50}ms">
+                            <svg class="w-10 h-10 text-red-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                                      d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                            </svg>
+                            <span class="text-red-400 text-xs font-semibold uppercase">${escapeHtml(refLabel)}</span>
+                            <span class="text-red-400 text-xs mt-0.5">Missing</span>
+                    </div>`;
+                }
+            });
+
+            const reviewHtml = mixedDatapointId ? adminReviewsHtml(mixedDatapointId) : '';
+
+            container.insertAdjacentHTML('beforeend', `
+                <div class="card-enter" style="animation-delay:100ms">
+                    <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3">Mixed Form Images</h3>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        ${cardsHtml}
+                    </div>
+                    ${reviewHtml}
+                </div>`);
+        }
+
+        function renderAdditionalMetadataAdmin(container, data) {
+            const entries = effectiveAdditionalMetadataEntries(data);
+            if (entries.length === 0) return;
+
+            let delay = 175;
+            let blocks = '';
+            entries.forEach((ent, idx) => {
+                const dpId = ent.datapoint_id || '';
+                const isEmptyState = Boolean(ent.empty_state);
+                const fnameRaw = ent.form_name || 'Additional metadata';
+                const fname = escapeHtml(fnameRaw);
+
+                let rowsHtml = '';
+                (ent.fields || []).forEach(f => {
+                    if (isHiddenAdditionalMetaField(f.label)) return;
+                    rowsHtml += `
+                        <div class="flex flex-wrap gap-x-3 gap-y-1 text-sm py-1.5 border-b border-gray-100 last:border-0">
+                            <span class="text-gray-500 font-medium shrink-0 max-w-[min(40vw,14rem)]">${escapeHtml(f.label)}</span>
+                            <span class="text-gray-900 break-words">${escapeHtml(f.value)}</span>
+                        </div>`;
+                });
+                const metaSubtitle = isEmptyState
+                    ? '<p class="text-xs text-gray-500 mb-3">No submission on file for this sample.</p>'
+                    : `<p class="text-xs text-gray-500 mb-3">${escapeHtml(ent.user || '')} · ${formatIST(ent.created_at)}</p>`;
+                const innerBox = isEmptyState
+                    ? `<p class="text-sm text-gray-500 italic">No additional metadata form was submitted for this sample.</p>`
+                    : (rowsHtml || '<p class="text-sm text-gray-400">No fields in this form payload.</p>');
+                const reviewHtml = dpId ? adminReviewsHtml(dpId) : '';
+                const chips = dpId ? `<span class="ml-1">${adminSummaryChips(dpId)}</span>` : '';
+
+                blocks += `
+                <div class="bg-white rounded-2xl shadow-md border border-gray-200 p-5 card-enter" style="animation-delay:${delay + idx * 40}ms">
+                    <h2 class="text-lg font-bold text-gray-900 mb-1 flex flex-wrap items-center gap-2">
+                        📝 ${fname}
+                        ${chips}
+                    </h2>
+                    ${metaSubtitle}
+                    <div class="rounded-xl bg-gray-50 border border-gray-100 p-3 max-h-[min(60vh,480px)] overflow-y-auto">
+                        ${innerBox}
+                    </div>
+                    ${reviewHtml}
+                </div>`;
+            });
+
+            container.insertAdjacentHTML('beforeend', `
+                <div class="card-enter" style="animation-delay:170ms">
+                    <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3">Additional metadata forms</h3>
+                    <div class="space-y-4">${blocks}</div>
+                </div>`);
+        }
+
+        function renderCategoryGroupsAdmin(container, categories) {
+            const byName = {};
+            categories.forEach(c => { byName[c.name] = c; });
+
+            let delay = 200;
+            supercatOrder.forEach(sc => {
+                const catNames = supercatGroups[sc] || [];
+                if (catNames.length === 0) return;
+
+                const cats = catNames.map(n => byName[n]).filter(Boolean);
+                const collected = cats.filter(c => c.exists).length;
+                const total = cats.length;
+                const label = supercatLabels[sc] || sc;
+
+                let barsHtml = '';
+                cats.forEach(cat => {
+                    barsHtml += renderCategoryBarAdmin(cat, delay);
+                    delay += 20;
+                });
+
+                container.insertAdjacentHTML('beforeend', `
+                    <div>
+                        <div class="flex items-center gap-3 mb-2">
+                            <h3 class="text-sm font-bold text-gray-500 uppercase tracking-wider">${escapeHtml(sc)} — ${escapeHtml(label)}</h3>
+                            <span class="text-xs text-gray-400">${collected}/${total} collected</span>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden divide-y divide-gray-100">
+                            ${barsHtml}
+                        </div>
+                    </div>`);
+            });
+        }
+
+        function renderCategoryBarAdmin(cat, delay) {
+            const name = pretty(cat.name);
+            const isAmb = cat.is_ambiguous;
+            const ambBadge = isAmb
+                ? '<span class="bg-yellow-100 text-yellow-700 text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-full">Amb</span>'
+                : '';
+
+            if (!cat.exists) {
+                return `
+                    <div class="cat-bar missing px-4 py-2.5 flex items-center gap-3 card-enter" style="animation-delay:${delay}ms">
+                        <span class="text-gray-300 text-xs">⬜</span>
+                        <span class="text-sm text-gray-400">${escapeHtml(name)}</span>
+                        ${ambBadge}
+                        <span class="ml-auto text-xs text-gray-300">Not collected</span>
+                    </div>`;
+            }
+
+            const weightStr = cat.weight != null ? `${cat.weight}g` : '—';
+            const expandId  = `expand-${cat.name}`;
+            const chevronId = `chev-${cat.name}`;
+            const dpId = cat.datapoint_id || '';
+
+            let ambChips = '';
+            if (isAmb && (cat.dg_weight != null || cat.gg_weight != null || cat.grg_weight != null)) {
+                ambChips = `<span class="text-xs text-gray-400 hidden sm:inline">DG:${cat.dg_weight ?? 0}g · GG:${cat.gg_weight ?? 0}g · GrG:${cat.grg_weight ?? 0}g</span>`;
+            }
+
+            const imgIcon = cat.has_image
+                ? '<span class="text-green-500 text-xs">🖼️</span>'
+                : '<span class="text-red-400 text-xs">⚠️ no img</span>';
+
+            const teamChips = dpId ? adminSummaryChips(dpId) : '';
+
+            const reviewHtml = dpId ? adminReviewsHtml(dpId) : '';
+
+            return `
+                <div class="card-enter" style="animation-delay:${delay}ms">
+                    <div class="cat-bar exists px-4 py-2.5 flex items-center gap-3"
+                         onclick="toggleExpand('${cat.name}')">
+                        <span id="${chevronId}" class="chevron text-gray-400 text-xs select-none">▶</span>
+                        <span class="text-sm font-semibold text-gray-800 min-w-[160px]">${escapeHtml(name)}</span>
+                        ${ambBadge}
+                        <span class="text-sm font-bold text-gray-900">${weightStr}</span>
+                        ${ambChips}
+                        <span class="ml-auto flex items-center gap-2 flex-wrap justify-end max-w-[min(50%,420px)]">
+                            <span class="flex flex-wrap items-center gap-1 justify-end">${teamChips}</span>
+                            ${imgIcon}
+                            <span class="text-xs text-gray-400 hidden md:inline">${escapeHtml(cat.user || '')} · ${formatIST(cat.created_at)}</span>
+                        </span>
+                    </div>
+                    <div id="${expandId}" class="expand-panel">
+                        <div class="px-4 py-4 bg-gray-50 border-t border-gray-100 space-y-3">
+                            ${cat.has_image ? `
+                                <img data-src="${cat.image_path}"
+                                     class="img-zoomable deferred-img max-w-2xl w-full object-contain rounded-xl bg-white border border-gray-200 mx-auto"
+                                     style="max-height: 500px;"
+                                     onclick="event.stopPropagation(); openModal('${cat.image_path}')"
+                                     onerror="this.src='https://via.placeholder.com/400x300?text=Load+Failed'">
+                            ` : `
+                                <div class="bg-red-50 border-2 border-dashed border-red-300 rounded-xl p-6 text-center max-w-md mx-auto">
+                                    <span class="text-red-400 text-sm font-medium">⚠️ Image not available</span>
+                                </div>
+                            `}
+                            <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-gray-700">
+                                <div><span class="font-semibold">Weight:</span> ${weightStr}</div>
+                                <div><span class="font-semibold">Ref Object:</span> ${pretty(cat.ref_object) || 'N/A'}</div>
+                                <div><span class="font-semibold">Form:</span> ${isAmb ? 'Ambiguous' : 'Standard'}</div>
+                                <div><span class="font-semibold">User:</span> ${escapeHtml(cat.user) || 'N/A'}</div>
+                                <div><span class="font-semibold">Time:</span> ${formatIST(cat.created_at)}</div>
+                            </div>
+                            ${isAmb && (cat.dg_weight != null || cat.gg_weight != null || cat.grg_weight != null) ? `
+                                <div class="bg-yellow-50 rounded-lg p-3 text-sm inline-block">
+                                    <span class="text-xs font-bold text-yellow-700 uppercase mr-2">Supercategory:</span>
+                                    <strong>DG:</strong> ${cat.dg_weight ?? 0}g &nbsp;
+                                    <strong>GG:</strong> ${cat.gg_weight ?? 0}g &nbsp;
+                                    <strong>GrG:</strong> ${cat.grg_weight ?? 0}g
+                                </div>
+                            ` : ''}
+                            <div class="flex justify-end">
+                                ${downloadBtn(cat.image_path)}
+                            </div>
+                            ${reviewHtml}
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        function toggleExpand(catName) {
+            const panel   = document.getElementById(`expand-${catName}`);
+            const chevron = document.getElementById(`chev-${catName}`);
+            if (panel) {
+                panel.classList.toggle('open');
+                if (chevron) chevron.classList.toggle('open');
+                if (panel.classList.contains('open')) {
+                    panel.querySelectorAll('img.deferred-img[data-src]').forEach(img => {
+                        if (!img.src || img.src === window.location.href) {
+                            img.src = img.dataset.src;
+                        }
+                    });
+                }
+            }
+        }
+
+        function openModal(src) {
+            document.getElementById('modal-image').src = src;
+            document.getElementById('modal-backdrop').classList.remove('hidden');
+            document.getElementById('modal-backdrop').classList.add('flex');
+        }
+        function closeModal() {
+            document.getElementById('modal-backdrop').classList.add('hidden');
+            document.getElementById('modal-backdrop').classList.remove('flex');
+        }
+
+        (function loadFromQueryString() {
+            const params = new URLSearchParams(window.location.search);
+            const requested = params.get('sample');
+            if (!requested) return;
+            const select = document.getElementById('sample-select');
+            const exists = [...select.options].some(o => o.value === requested);
+            if (!exists) return;
+            select.value = requested;
+            loadSummary();
+        })();
+    </script>
+</body>
+</html>

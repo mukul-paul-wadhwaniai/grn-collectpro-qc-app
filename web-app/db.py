@@ -9,6 +9,7 @@ Tables:
 import json
 import sqlite3
 import threading
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -62,13 +63,28 @@ def init_db():
             ON reviews(team);
     """)
     conn.commit()
+    _ensure_optional_review_columns()
+
+
+def _ensure_optional_review_columns():
+    """ADD COLUMN migrations for existing SQLite DBs (idempotent)."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "ALTER TABLE reviews ADD COLUMN reviewer_username TEXT"
+        )
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
 
 
 # ------------------------------------------------------------------
 # Reviews
 # ------------------------------------------------------------------
 def save_review(team, sample_number, datapoint_id, form_type,
-                sample_category, verdict, issue_types=None, remark=None):
+                sample_category, verdict, issue_types=None, remark=None,
+                reviewer_username=None):
     """UPSERT a review. issue_types is a list of strings, stored as JSON."""
     conn = _get_conn()
     now = datetime.now(timezone.utc).isoformat()
@@ -76,16 +92,18 @@ def save_review(team, sample_number, datapoint_id, form_type,
     conn.execute("""
         INSERT INTO reviews
             (team, sample_number, datapoint_id, form_type,
-             sample_category, verdict, issue_types, remark,
+             sample_category, verdict, issue_types, remark, reviewer_username,
              created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(team, datapoint_id) DO UPDATE SET
             verdict     = excluded.verdict,
             issue_types = excluded.issue_types,
             remark      = excluded.remark,
+            reviewer_username = excluded.reviewer_username,
             updated_at  = excluded.updated_at
     """, (team, int(sample_number), str(datapoint_id), form_type,
-          sample_category, verdict, issue_types_json, remark, now, now))
+          sample_category, verdict, issue_types_json, remark, reviewer_username,
+          now, now))
     conn.commit()
     return {
         "team": team,
@@ -125,7 +143,8 @@ def get_reviews_for_sample(team, sample_number):
     """Return {datapoint_id: {verdict, issue_types, remark, updated_at}} for one team + sample."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT datapoint_id, verdict, issue_types, remark, updated_at "
+        "SELECT datapoint_id, verdict, issue_types, remark, updated_at, "
+        "       reviewer_username "
         "FROM reviews WHERE team = ? AND sample_number = ?",
         (team, int(sample_number)),
     ).fetchall()
@@ -135,6 +154,28 @@ def get_reviews_for_sample(team, sample_number):
         d["issue_types"] = _parse_issue_types(d["issue_types"])
         result[d["datapoint_id"]] = d
     return result
+
+
+def get_reviews_all_teams_for_sample(sample_number):
+    """
+    Return { datapoint_id: [ { team, verdict, issue_types, remark, reviewer_username,
+                               form_type, sample_category, updated_at, ... }, ... ] }
+    for every team's review on this sample.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT team, datapoint_id, form_type, sample_category, verdict, "
+        "       issue_types, remark, reviewer_username, updated_at "
+        "FROM reviews WHERE sample_number = ? "
+        "ORDER BY datapoint_id, team",
+        (int(sample_number),),
+    ).fetchall()
+    by_dp: dict[str, list] = defaultdict(list)
+    for row in rows:
+        d = dict(row)
+        d["issue_types"] = _parse_issue_types(d["issue_types"])
+        by_dp[str(d["datapoint_id"])].append(d)
+    return dict(by_dp)
 
 
 def get_all_reviews():

@@ -21,6 +21,7 @@ from util import ensure_s3_image_cached, parse_s3_url
 
 from db import (
     init_db, save_review, delete_review, get_reviews_for_sample,
+    get_reviews_all_teams_for_sample,
     get_all_reviews, get_issue_types, add_issue_type,
     get_review_counts_by_sample_and_team,
 )
@@ -40,12 +41,21 @@ ADDITIONAL_METADATA_FILE = os.environ.get(
 STATIC_IMG_DIR = Path("static/images")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "agri-grn-prod-dip-bucket")
 
+# Optional unified admin view (read-only across all teams). Set GRAIN_REVIEW_ADMIN_PASSWORD to enable login user "admin".
+_GRAIN_ADMIN_PASSWORD = os.environ.get("GRAIN_REVIEW_ADMIN_PASSWORD", "").strip()
+
 # Team accounts: username → { password, team }
 TEAM_ACCOUNTS = {
-    "ml":         {"password": r"qM565~v-Tw\K", "team": "ML"},
+    "ml": {"password": r"qM565~v-Tw\K", "team": "ML"},
     "programmes": {"password": r"qM565~v-Tw\K", "team": "Programmes"},
-    "product":    {"password": r"qM565~v-Tw\K", "team": "Product"},
+    "product": {"password": r"qM565~v-Tw\K", "team": "Product"},
 }
+if _GRAIN_ADMIN_PASSWORD:
+    TEAM_ACCOUNTS["admin"] = {
+        "password": _GRAIN_ADMIN_PASSWORD,
+        "team": "Admin",
+        "is_admin": True,
+    }
 TEAMS = ["ML", "Programmes", "Product"]
 
 app = Flask(__name__)
@@ -378,6 +388,10 @@ def is_logged_in() -> bool:
     return session.get("team") is not None
 
 
+def is_admin() -> bool:
+    return bool(session.get("is_admin"))
+
+
 # ---------------------------------------------------------------------------
 # Routes: Auth
 # ---------------------------------------------------------------------------
@@ -391,6 +405,9 @@ def login():
         if account and account["password"] == password:
             session["username"] = username
             session["team"] = account["team"]
+            session["is_admin"] = bool(account.get("is_admin"))
+            if session["is_admin"]:
+                return redirect(url_for("admin_view"))
             return redirect(url_for("index"))
         error = "Invalid username or password"
     return render_template("login.html", error=error)
@@ -409,6 +426,11 @@ def logout():
 def index():
     if not is_logged_in():
         return redirect(url_for("login"))
+    if is_admin():
+        sample_q = request.args.get("sample")
+        if sample_q:
+            return redirect(url_for("admin_view", sample=sample_q))
+        return redirect(url_for("admin_view"))
     return render_template(
         "index.html",
         team=session["team"],
@@ -420,6 +442,26 @@ def index():
         fine_standard=list(FINE_PROTOCOL_STANDARD.keys()),
         fine_ambiguous=list(FINE_PROTOCOL_AMBIGUOUS.keys()),
         all_categories=ALL_CATEGORIES,
+    )
+
+
+@app.route("/admin")
+def admin_view():
+    if not is_logged_in():
+        return redirect(url_for("login"))
+    if not is_admin():
+        return redirect(url_for("index"))
+    return render_template(
+        "admin_view.html",
+        team=session["team"],
+        username=session["username"],
+        sample_numbers=SAMPLE_NUMBERS,
+        supercat_order=SUPERCAT_ORDER,
+        supercat_labels=SUPERCAT_LABELS,
+        supercat_groups=SUPERCAT_GROUPS,
+        fine_ambiguous=list(FINE_PROTOCOL_AMBIGUOUS.keys()),
+        all_categories=ALL_CATEGORIES,
+        teams=TEAMS,
     )
 
 
@@ -592,8 +634,13 @@ def sample_summary(sample_id):
                 "empty_state": True,
             })
 
-        # --- Reviews for this team ---
-        reviews = get_reviews_for_sample(team, sample_id)
+        # --- Reviews (one team) or all teams for admin unified view ---
+        if is_admin():
+            reviews_out: dict = {}
+            reviews_by_team = get_reviews_all_teams_for_sample(sample_id)
+        else:
+            reviews_out = get_reviews_for_sample(team, sample_id)
+            reviews_by_team = None
 
         return jsonify({
             "sample_id": sample_id,
@@ -605,7 +652,8 @@ def sample_summary(sample_id):
             "categories": all_cat_list,
             "diagnostics": diagnostics,
             "additional_metadata": additional_metadata_out,
-            "reviews": reviews,
+            "reviews": reviews_out,
+            "reviews_by_team": reviews_by_team,
         })
     except Exception as e:
         import traceback
@@ -620,6 +668,8 @@ def sample_summary(sample_id):
 def api_save_review():
     if not is_logged_in():
         return jsonify({"error": "Unauthorized"}), 401
+    if is_admin():
+        return jsonify({"error": "Admin view is read-only"}), 403
 
     team = get_team()
     data = request.get_json()
@@ -640,6 +690,7 @@ def api_save_review():
         verdict=data["verdict"],
         issue_types=data.get("issue_types"),
         remark=data.get("remark"),
+        reviewer_username=session.get("username"),
     )
     return jsonify(result)
 
@@ -648,6 +699,8 @@ def api_save_review():
 def api_delete_review():
     if not is_logged_in():
         return jsonify({"error": "Unauthorized"}), 401
+    if is_admin():
+        return jsonify({"error": "Admin view is read-only"}), 403
 
     team = get_team()
     data = request.get_json()
@@ -675,6 +728,8 @@ def api_get_issue_types():
 def api_add_issue_type():
     if not is_logged_in():
         return jsonify({"error": "Unauthorized"}), 401
+    if is_admin():
+        return jsonify({"error": "Admin view is read-only"}), 403
 
     data = request.get_json()
     label = (data.get("label") or "").strip()
@@ -1006,4 +1061,4 @@ if __name__ == "__main__":
     print(f"Teams: {', '.join(TEAMS)}")
     print(f"Accounts: {', '.join(TEAM_ACCOUNTS.keys())}")
     debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
-    app.run(host="0.0.0.0", port=7865, debug=debug, use_reloader=debug)
+    app.run(host="0.0.0.0", port=7862, debug=debug, use_reloader=debug)
