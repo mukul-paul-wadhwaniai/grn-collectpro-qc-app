@@ -11,7 +11,7 @@ from util import (
     logger,
 )
 
-DEBUG_SAMPLE_NUMBERS = [0, 1, 2]
+DEBUG_SAMPLE_NUMBERS = [0, 1, 2, 1234, 20024]
 
 S3_BUCKET_NAME = 'agri-grn-prod-dip-bucket'
 PROJECT_NAME = "GRN WIAI Round 3 Collection"
@@ -550,13 +550,17 @@ def main():
     # Images stay on S3 (s3_url in parquet). The review app downloads them to VM disk on load.
     new_processed = new_df
 
-    # 8. Merge with existing data
+    # 8a. Merge with existing data
     if existing_df is not None:
         final_output_df = pd.concat([existing_df, new_processed], ignore_index=True)
         # dedup final df
         final_output_df = validate_and_dedup(final_output_df, is_processed=True)
     else:
         final_output_df = new_processed
+    
+    # 8b. Filter out debug sample numbers
+    final_output_df = final_output_df[~final_output_df['sample_number'].isin(DEBUG_SAMPLE_NUMBERS)]
+    logger.info(f"Filtered out {len(DEBUG_SAMPLE_NUMBERS)} debug sample numbers")
 
     # 9. Save timestamped parquet
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
