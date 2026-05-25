@@ -46,16 +46,12 @@ _GRAIN_ADMIN_PASSWORD = os.environ.get("GRAIN_REVIEW_ADMIN_PASSWORD", "").strip(
 
 # Team accounts: username → { password, team }
 TEAM_ACCOUNTS = {
-    "ml": {"password": r"qM565~v-Tw\K", "team": "ML"},
-    "programmes": {"password": r"qM565~v-Tw\K", "team": "Programmes"},
-    "product": {"password": r"qM565~v-Tw\K", "team": "Product"},
+    "ml": {"password": os.environ.get("GRAIN_REVIEW_ML_PASSWORD", "").strip(), "team": "ML"},
+    "programmes": {"password": os.environ.get("GRAIN_REVIEW_PROGRAMMES_PASSWORD", "").strip(), "team": "Programmes"},
+    "product": {"password": os.environ.get("GRAIN_REVIEW_PRODUCT_PASSWORD", "").strip(), "team": "Product"},
+    "admin": {"password": os.environ.get("GRAIN_REVIEW_ADMIN_PASSWORD", "").strip(), "team": "Admin", "is_admin": True}
 }
-if _GRAIN_ADMIN_PASSWORD:
-    TEAM_ACCOUNTS["admin"] = {
-        "password": _GRAIN_ADMIN_PASSWORD,
-        "team": "Admin",
-        "is_admin": True,
-    }
+
 TEAMS = ["ML", "Programmes", "Product"]
 
 app = Flask(__name__)
