@@ -547,7 +547,7 @@ def main():
     new_df = pd.DataFrame(new_rows)
     logger.info(f"Generated {len(new_df)} new rows")
 
-    # Images stay on S3 (s3_url in parquet). The review app downloads them to VM disk on load.
+    # Images are served via presigned S3 URLs from the review app (s3_url in parquet).
     new_processed = new_df
 
     # 8a. Merge with existing data

@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import subprocess
 import logging
@@ -19,7 +20,12 @@ try:
     import boto3
     from botocore.exceptions import ClientError, NoCredentialsError
 
-    S3_CLIENT = boto3.client("s3")
+    _s3_region = (
+        os.environ.get("S3_REGION_NAME")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "ap-south-1"
+    )
+    S3_CLIENT = boto3.client("s3", region_name=_s3_region)
 except Exception as e:
     S3_CLIENT = None
     print(f"Warning: boto3 or S3 client setup failed ({e})")
@@ -44,6 +50,29 @@ def parse_s3_url(s3_url: str):
     key = unquote(parsed.path.lstrip("/")).replace("+", " ")
     filename = Path(key).name
     return bucket, key, filename
+
+
+def generate_presigned_s3_url(
+    s3_url: str,
+    bucket_name: str | None = None,
+    expires_in: int = 3600,
+) -> str | None:
+    """
+    Return a time-limited HTTPS URL for direct browser access to an S3 object.
+    """
+    if not s3_url or S3_CLIENT is None:
+        return None
+    try:
+        parsed_bucket, key, _ = parse_s3_url(s3_url)
+        bucket = bucket_name or parsed_bucket
+        return S3_CLIENT.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=expires_in,
+        )
+    except (ClientError, NoCredentialsError) as e:
+        logger.error(f"Failed to presign S3 URL ({s3_url}): {e}")
+        return None
 
 
 def upload_to_gcp(local_path: Path, gcp_prefix: Path, bucket_name: str) -> str:
