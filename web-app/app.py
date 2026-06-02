@@ -1025,4 +1025,5 @@ if __name__ == "__main__":
     print(f"Teams: {', '.join(TEAMS)}")
     print(f"Accounts: {', '.join(TEAM_ACCOUNTS.keys())}")
     debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
-    app.run(host="0.0.0.0", port=7862, debug=debug, use_reloader=debug)
+    port = int(os.environ.get("PORT", 7862))
+    app.run(host="0.0.0.0", port=port, debug=debug, use_reloader=debug)
