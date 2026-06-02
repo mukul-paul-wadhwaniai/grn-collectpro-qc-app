@@ -29,15 +29,11 @@ from db import (
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DATA_FILE = "/data/temp_dir/latest.parquet"
-SAMPLES_DASHBOARD_FILE = os.environ.get(
-    "SAMPLES_DASHBOARD_FILE",
-    "/data/temp_dir/samples_dashboard.parquet",
-)
-ADDITIONAL_METADATA_FILE = os.environ.get(
-    "ADDITIONAL_METADATA_FILE",
-    "/data/temp_dir/additional_metadata.parquet",
-)
+DATA_DIR = Path(os.environ.get("DATA_DIR"))
+DATA_FILE = f"{DATA_DIR}/latest.parquet"
+SAMPLES_DASHBOARD_FILE = f"{DATA_DIR}/samples_dashboard.parquet"
+ADDITIONAL_METADATA_FILE = f"{DATA_DIR}/additional_metadata.parquet"
+
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
 S3_PRESIGNED_URL_EXPIRY = int(os.environ.get("S3_PRESIGNED_URL_EXPIRY"))
 

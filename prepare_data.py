@@ -75,7 +75,7 @@ def extract_sample_number(data) -> int | None:
 
 
 # Output directory for timestamped parquet archives
-OUTPUT_DIR = Path("/data/temp_dir") # NOTE: this is a temporary directory for testing
+OUTPUT_DIR = Path(os.environ.get("DATA_DIR")) # NOTE: this is a temporary directory for testing
 PROCESSED_SYMLINK = OUTPUT_DIR / "latest.parquet"
 ADDITIONAL_METADATA_SYMLINK = OUTPUT_DIR / "additional_metadata.parquet"
 
