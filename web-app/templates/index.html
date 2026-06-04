@@ -121,8 +121,11 @@
 
         function downloadBtn(imgPath) {
             if (!imgPath) return '';
-            const filename = imgPath.split('/').pop();
-            return `<a href="/download/${filename}"
+            const filename = imgPath.split('?')[0].split('/').pop();
+            return `<a href="${imgPath}"
+                       download="${filename}"
+                       target="_blank"
+                       rel="noopener noreferrer"
                        class="inline-flex items-center gap-1 text-sm text-indigo-600 hover:text-indigo-800 font-medium transition"
                        title="Download full-res image">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">

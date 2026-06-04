@@ -11,7 +11,7 @@ from util import (
     logger,
 )
 
-DEBUG_SAMPLE_NUMBERS = [0, 1, 2]
+DEBUG_SAMPLE_NUMBERS = [0, 1, 2, 1234, 20024]
 
 S3_BUCKET_NAME = 'agri-grn-prod-dip-bucket'
 PROJECT_NAME = "GRN WIAI Round 3 Collection"
@@ -75,7 +75,7 @@ def extract_sample_number(data) -> int | None:
 
 
 # Output directory for timestamped parquet archives
-OUTPUT_DIR = Path("/data/temp_dir") # NOTE: this is a temporary directory for testing
+OUTPUT_DIR = Path(os.environ.get("DATA_DIR")) # NOTE: this is a temporary directory for testing
 PROCESSED_SYMLINK = OUTPUT_DIR / "latest.parquet"
 ADDITIONAL_METADATA_SYMLINK = OUTPUT_DIR / "additional_metadata.parquet"
 
@@ -445,6 +445,25 @@ def process_sample_group(sample_number, sample_df, skip_datapoint_ids=None):
 
     return processed_rows
 
+
+# Interim DB dumps from connect.py — not used after setup_df / dashboard export.
+CSV_DUMP_FILES = (
+    "auth_user.csv",
+    "projectapp_dataset.csv",
+    "projectapp_datapoint.csv",
+    "projectapp_file.csv",
+    "projectapp_project.csv",
+)
+
+
+def _cleanup_csv_dumps() -> None:
+    for name in CSV_DUMP_FILES:
+        path = Path(name)
+        if path.exists():
+            path.unlink()
+            logger.info("Removed interim CSV dump: %s", name)
+
+
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
@@ -476,6 +495,8 @@ def main():
 
     meta_export_df = build_additional_metadata_export(raw_full, EXTRA_FORM_NAMES)
     write_additional_metadata_parquet(meta_export_df, OUTPUT_DIR)
+
+    _cleanup_csv_dumps()
 
     # 2c. Pipeline subset: only image-bearing protocol forms
     raw_df = raw_full[raw_full["form_name"].isin(FORM_NAMES)].copy()
@@ -547,16 +568,20 @@ def main():
     new_df = pd.DataFrame(new_rows)
     logger.info(f"Generated {len(new_df)} new rows")
 
-    # Images stay on S3 (s3_url in parquet). The review app downloads them to VM disk on load.
+    # Images are served via presigned S3 URLs from the review app (s3_url in parquet).
     new_processed = new_df
 
-    # 8. Merge with existing data
+    # 8a. Merge with existing data
     if existing_df is not None:
         final_output_df = pd.concat([existing_df, new_processed], ignore_index=True)
         # dedup final df
         final_output_df = validate_and_dedup(final_output_df, is_processed=True)
     else:
         final_output_df = new_processed
+    
+    # 8b. Filter out debug sample numbers
+    final_output_df = final_output_df[~final_output_df['sample_number'].isin(DEBUG_SAMPLE_NUMBERS)]
+    logger.info(f"Filtered out {len(DEBUG_SAMPLE_NUMBERS)} debug sample numbers")
 
     # 9. Save timestamped parquet
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

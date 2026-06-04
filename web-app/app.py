@@ -11,13 +11,13 @@ import pandas as pd
 from pathlib import Path
 from flask import (
     Flask, render_template, jsonify, request,
-    send_from_directory, session, redirect, url_for,
+    session, redirect, url_for,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from util import ensure_s3_image_cached, parse_s3_url
+from util import generate_presigned_s3_url
 
 from db import (
     init_db, save_review, delete_review, get_reviews_for_sample,
@@ -29,17 +29,13 @@ from db import (
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DATA_FILE = "/data/temp_dir/latest.parquet"
-SAMPLES_DASHBOARD_FILE = os.environ.get(
-    "SAMPLES_DASHBOARD_FILE",
-    "/data/temp_dir/samples_dashboard.parquet",
-)
-ADDITIONAL_METADATA_FILE = os.environ.get(
-    "ADDITIONAL_METADATA_FILE",
-    "/data/temp_dir/additional_metadata.parquet",
-)
-STATIC_IMG_DIR = Path("static/images")
-S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "agri-grn-prod-dip-bucket")
+DATA_DIR = Path(os.environ.get("DATA_DIR"))
+DATA_FILE = f"{DATA_DIR}/latest.parquet"
+SAMPLES_DASHBOARD_FILE = f"{DATA_DIR}/samples_dashboard.parquet"
+ADDITIONAL_METADATA_FILE = f"{DATA_DIR}/additional_metadata.parquet"
+
+S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
+S3_PRESIGNED_URL_EXPIRY = int(os.environ.get("S3_PRESIGNED_URL_EXPIRY"))
 
 # Optional unified admin view (read-only across all teams). Set GRAIN_REVIEW_ADMIN_PASSWORD to enable login user "admin".
 _GRAIN_ADMIN_PASSWORD = os.environ.get("GRAIN_REVIEW_ADMIN_PASSWORD", "").strip()
@@ -57,8 +53,6 @@ TEAMS = ["ML", "Programmes", "Product"]
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 # app.config["TEMPLATES_AUTO_RELOAD"] = True
-
-STATIC_IMG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Form Types
 MIXED_FORM = "MixedSample_FineProtocol"
@@ -132,36 +126,16 @@ for _cat, _sc in ALL_CATEGORIES.items():
 
 
 # ---------------------------------------------------------------------------
-# Pre-fetch images (S3 → VM local cache)
+# S3 presigned URLs (served directly to browser; no local image cache)
 # ---------------------------------------------------------------------------
-def pre_download_images(dataframe):
-    """Download missing images from S3 into static/images for the review UI."""
-    print(f"Checking and pre-fetching images from S3 (bucket={S3_BUCKET_NAME}) …")
-    STATIC_IMG_DIR.mkdir(parents=True, exist_ok=True)
-    local_paths = []
-    n_downloaded = 0
-    for _, row in dataframe.iterrows():
-        s3_url = row.get("s3_url")
-        if not s3_url or pd.isna(s3_url):
-            local_paths.append(None)
-            continue
-        _, _, filename = parse_s3_url(str(s3_url))
-        local_filepath = STATIC_IMG_DIR / filename
-        existed = local_filepath.exists() and local_filepath.stat().st_size > 0
-        cached = ensure_s3_image_cached(
-            s3_url=str(s3_url),
-            cache_dir=STATIC_IMG_DIR,
-            bucket_name=S3_BUCKET_NAME,
-        )
-        if cached and not existed:
-            n_downloaded += 1
-        if cached and cached.exists():
-            local_paths.append(f"/static/images/{filename}")
-        else:
-            local_paths.append(None)
-    dataframe["local_image_path"] = local_paths
-    print(f"S3 image sync complete ({n_downloaded} newly downloaded).")
-    return dataframe
+def _presigned_image_url(s3_url) -> str | None:
+    if s3_url is None or pd.isna(s3_url):
+        return None
+    return generate_presigned_s3_url(
+        str(s3_url),
+        bucket_name=S3_BUCKET_NAME,
+        expires_in=S3_PRESIGNED_URL_EXPIRY,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +218,7 @@ SAMPLE_NUMBERS: list[int] = []
 
 
 def _load_data():
-    """Load parquet + pre-fetch images, then swap global state.
+    """Load parquet and swap global state.
 
     On failure the previous df / SAMPLE_NUMBERS stay in place so the app
     keeps serving stale-but-valid data.  _parquet_mtime is still updated
@@ -255,7 +229,6 @@ def _load_data():
     try:
         print(f"Loading data from {DATA_FILE} …")
         new_df = pd.read_parquet(DATA_FILE)
-        new_df = pre_download_images(new_df)
         new_mtime = os.path.getmtime(DATA_FILE)
         # Atomic swap — only reached if everything above succeeded
         df = new_df
@@ -329,7 +302,7 @@ def _auto_sync():
     """Check parquet mtime; non-blocking reload if changed.
 
     Uses non-blocking lock acquisition so that concurrent requests are
-    never stalled behind a slow reload (image downloads can take minutes).
+    never stalled behind a slow reload.
     Requests that arrive while a reload is in progress simply proceed
     with the current (slightly stale but valid) data.
     """
@@ -513,11 +486,11 @@ def sample_summary(sample_id):
             }
             for _, mrow in mixed_rows.iterrows():
                 ref = sanitize(mrow.get("reference_object"))
-                mixed_image_path = sanitize(mrow.get("local_image_path"))
+                mixed_image_url = _presigned_image_url(mrow.get("s3_url"))
                 mixed_images.append({
                     "ref": ref,
-                    "has_image": mixed_image_path is not None,
-                    "image_path": mixed_image_path,
+                    "has_image": mixed_image_url is not None,
+                    "image_path": mixed_image_url,
                     "sample_category": sanitize(mrow.get("sample_category")),
                 })
 
@@ -535,6 +508,7 @@ def sample_summary(sample_id):
             cat_weight = float(cat_weight)
 
             raw_dp = crow.get("datapoint_id")
+            cat_image_url = _presigned_image_url(crow.get("s3_url"))
             entry = {
                 "name": cat_name,
                 "datapoint_id": str(raw_dp) if pd.notna(raw_dp) else None,
@@ -543,8 +517,8 @@ def sample_summary(sample_id):
                 "is_ambiguous": crow.get("form_type") == AMBIGUOUS_FORM,
                 "exists": True,
                 "weight": cat_weight,
-                "has_image": pd.notna(crow.get("local_image_path")),
-                "image_path": sanitize(crow.get("local_image_path")),
+                "has_image": cat_image_url is not None,
+                "image_path": cat_image_url,
                 "ref_object": sanitize(crow.get("reference_object")),
                 "user": sanitize(crow.get("user")),
                 "created_at": sanitize(crow.get("created_at")),
@@ -1041,20 +1015,11 @@ def dashboard():
 
 
 # ---------------------------------------------------------------------------
-# Routes: Image download
-# ---------------------------------------------------------------------------
-@app.route("/download/<path:filename>")
-def download_image(filename):
-    if not is_logged_in():
-        return redirect(url_for("login"))
-    return send_from_directory(str(STATIC_IMG_DIR), filename, as_attachment=True)
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print(f"Teams: {', '.join(TEAMS)}")
     print(f"Accounts: {', '.join(TEAM_ACCOUNTS.keys())}")
     debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
-    app.run(host="0.0.0.0", port=7862, debug=debug, use_reloader=debug)
+    port = int(os.environ.get("PORT", 7862))
+    app.run(host="0.0.0.0", port=port, debug=debug, use_reloader=debug)
