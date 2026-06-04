@@ -75,7 +75,7 @@ def extract_sample_number(data) -> int | None:
 
 
 # Output directory for timestamped parquet archives
-OUTPUT_DIR = Path("/data/temp_dir") # NOTE: this is a temporary directory for testing
+OUTPUT_DIR = Path(os.environ.get("DATA_DIR")) # NOTE: this is a temporary directory for testing
 PROCESSED_SYMLINK = OUTPUT_DIR / "latest.parquet"
 ADDITIONAL_METADATA_SYMLINK = OUTPUT_DIR / "additional_metadata.parquet"
 
@@ -445,6 +445,25 @@ def process_sample_group(sample_number, sample_df, skip_datapoint_ids=None):
 
     return processed_rows
 
+
+# Interim DB dumps from connect.py — not used after setup_df / dashboard export.
+CSV_DUMP_FILES = (
+    "auth_user.csv",
+    "projectapp_dataset.csv",
+    "projectapp_datapoint.csv",
+    "projectapp_file.csv",
+    "projectapp_project.csv",
+)
+
+
+def _cleanup_csv_dumps() -> None:
+    for name in CSV_DUMP_FILES:
+        path = Path(name)
+        if path.exists():
+            path.unlink()
+            logger.info("Removed interim CSV dump: %s", name)
+
+
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
@@ -476,6 +495,8 @@ def main():
 
     meta_export_df = build_additional_metadata_export(raw_full, EXTRA_FORM_NAMES)
     write_additional_metadata_parquet(meta_export_df, OUTPUT_DIR)
+
+    _cleanup_csv_dumps()
 
     # 2c. Pipeline subset: only image-bearing protocol forms
     raw_df = raw_full[raw_full["form_name"].isin(FORM_NAMES)].copy()
@@ -547,7 +568,7 @@ def main():
     new_df = pd.DataFrame(new_rows)
     logger.info(f"Generated {len(new_df)} new rows")
 
-    # Images stay on S3 (s3_url in parquet). The review app downloads them to VM disk on load.
+    # Images are served via presigned S3 URLs from the review app (s3_url in parquet).
     new_processed = new_df
 
     # 8a. Merge with existing data
