@@ -30,7 +30,7 @@ FORM_NAMES = [MIXED_FORM, CATEGORY_FORM, AMBIGUOUS_FORM]
 #     for x in os.environ.get("GRN_EXTRA_FORM_NAMES", "").split(",")
 #     if x.strip()
 # ]
-EXTRA_FORM_NAMES = [ "Additional metadata fine protocol", "Additional Metadata Fine Protocol" ]
+EXTRA_FORM_NAMES = [ "Additional metadata fine protocol"]
 ALL_FORM_NAMES = list(dict.fromkeys(FORM_NAMES + EXTRA_FORM_NAMES))
 
 # list of users for this season's collection
