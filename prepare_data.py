@@ -11,6 +11,8 @@ from util import (
     logger,
 )
 
+START_SAMPLE_NUMBER = 40001
+
 S3_BUCKET_NAME = 'agri-grn-prod-dip-bucket'
 PROJECT_NAME = "GRN WIAI Round 3 Collection"
 SOURCE = "wiai_round_3_collection"
@@ -578,7 +580,7 @@ def main():
         final_output_df = new_processed
     
     # 8b. Filter out debug sample numbers
-    debug_samples_mask = final_output_df['sample_number'] < 40001
+    debug_samples_mask = final_output_df['sample_number'] < START_SAMPLE_NUMBER
     final_output_df = final_output_df[~debug_samples_mask]
     logger.info(f"Filtered out {len(debug_samples_mask)} debug sample numbers")
 
