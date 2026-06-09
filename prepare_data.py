@@ -76,7 +76,7 @@ FIELD_NAME_TO_KEY_MAPPING = {
     'variety': 'sample_metadata.variety',
 
     # Additional metadata form
-    'reference_object_along_a4_sheet': 'reference_object_along_a4_sheet',
+    'reference_object_along_a4_sheet': 'reference_object_used_along_with_a4_sheet',
     'background_on_which_the_a4_sheet_is_placed': 'background_on_which_the_a4_sheet_is_placed',
 }
 
