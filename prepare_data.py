@@ -13,6 +13,8 @@ from util import (
 
 DEBUG_SAMPLE_NUMBERS = [0, 1, 2, 1234, 20024]
 
+CORRECTIONS_PATH = Path(os.environ.get("CORRECTIONS_PATH", "corrections.yaml"))
+
 S3_BUCKET_NAME = 'agri-grn-prod-dip-bucket'
 PROJECT_NAME = "GRN WIAI Round 3 Collection"
 SOURCE = "wiai_round_3_collection"
@@ -46,6 +48,129 @@ REF_NAME_MAPPING = {
     'sample_with_rs_50_note': '50_note',
     'sample_with_rs_100_note': '100_note'
 }
+
+FIELD_NAME_TO_KEY_MAPPING = {
+    # Common fields for all forms
+    'sample_number': 'sample_metadata.sample_number',
+    'weight': 'sample_metadata.weight_(in_grams)',
+
+    # Category form
+    'category': 'sample_metadata.sample_category',
+    'category_image': 'image_capture_section.sample_with_selected_reference_object',
+    'reference_object': 'select_one_of_the_reference_objects_from_the_dropdown_(use_the_same_reference_object_for_all_the_categories_and_the_ambiguous_categories_in_a_sample).reference_object',
+    
+    # Ambiguous Category form
+    'dg_weight': 'supercategory_mapping_section_(bite_all_grains_and_segregate_into_true_supercategory).weight_of_dg_supercategory_',
+    'gg_weight': 'supercategory_mapping_section_(bite_all_grains_and_segregate_into_true_supercategory).weight_of_gg_supercategory_',
+    'grg_weight': 'supercategory_mapping_section_(bite_all_grains_and_segregate_into_true_supercategory).weight_of_grg_supercategory_',
+    
+    # Mixed form
+    'background_name': 'sample_metadata.background',
+    'empty_image': 'image_capture_section.empty_image',
+    'a4_sheet_image': 'image_capture_section.sample_with_a4_sheet',
+    '50_note_image': 'image_capture_section.sample_with_rs_50_note',
+    '100_note_image': 'image_capture_section.sample_with_rs_100_note',
+    'moisture_value_1': 'sample_metadata.moisture_value_1_',
+    'moisture_value_2': 'sample_metadata.moisture_value_2',
+    'moisture_value_3': 'sample_metadata.moisture_value_3',
+    'variety': 'sample_metadata.variety',
+
+    # Additional metadata form
+    'reference_object_along_a4_sheet': 'reference_object_along_a4_sheet',
+    'background_on_which_the_a4_sheet_is_placed': 'background_on_which_the_a4_sheet_is_placed',
+}
+
+
+def _set_nested_dict_value(d: dict, path: str, value):
+    """Helper to mutate values inside nested dictionaries using dot notation paths from FIELD_NAME_TO_KEY_MAPPING."""
+    if value is None:
+        logger.warning(f"Value is None for correction. Skipping correction for field {path}.")
+        return
+    
+    keys = path.split('.')
+    current = d
+    for key in keys[:-1]:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    
+    # Simple type normalization based on key targets
+    target_key = keys[-1]
+    if target_key == 'sample_number':
+        try:
+            value = int(value)
+        except (ValueError, TypeError):
+            logger.warning(f"New value for sample number is not an integer. Skipping correction for field {path}.")
+            return
+    elif 'moisture' in target_key:
+        try:
+            value = float(value)
+        except (ValueError, TypeError):
+            logger.warning(f"New value for moisture is not a float. Skipping correction for field {path}.")
+            return
+    elif 'weight' in target_key:
+        try:
+            value = float(value)
+        except (ValueError, TypeError):
+            logger.warning(f"New value for weight is not a float. Skipping correction for field {path}.")
+            return
+
+    current[target_key] = value
+
+
+def apply_raw_corrections(df: pd.DataFrame, corrections_path: Path) -> set:
+    """
+    Reads modifications from a YAML file and updates the raw nested data 
+    dictionaries inside the DataFrame in-place.
+    """
+    import yaml
+    import copy
+
+    if not corrections_path.exists():
+        logger.info(f"No corrections YAML file found at {corrections_path}. Skipping.")
+        return set()
+
+    with open(corrections_path, 'r') as f:
+        try:
+            config = yaml.safe_load(f)
+        except Exception as e:
+            logger.error(f"Error parsing corrections YAML file: {e}")
+            return set()
+
+    corrections = config.get('corrections', [])
+    if not corrections:
+        return set()
+
+    corrected_ids = set()
+    for item in corrections:
+        dp_id = item.get('datapoint_id')
+        field_name = item.get('field_name')
+        new_value = item.get('new_value')
+
+        if (dp_id is None) or (field_name is None) or (new_value is None) or (new_value == ""):
+            logger.warning(f"Missing required fields for correction. Skipping entry for datapoint {dp_id}.")
+            continue
+
+        if field_name not in FIELD_NAME_TO_KEY_MAPPING:
+            logger.warning(f"Field '{field_name}' mapping not found. Skipping entry for datapoint {dp_id}.")
+            continue
+
+        path = FIELD_NAME_TO_KEY_MAPPING[field_name]
+        mask = df['datapoint_id'] == dp_id
+
+        if not mask.any():
+            logger.warning(f"Datapoint {dp_id} not found in dataframe. Skipping correction for field {field_name}.")
+            continue
+
+        idx = df[mask].index[0]
+
+        raw_data = copy.deepcopy(df.at[idx, 'data'])
+        _set_nested_dict_value(raw_data, path, new_value)
+        df.at[idx, 'data'] = raw_data
+        corrected_ids.add(int(dp_id))
+        logger.info(f"Applied raw correction to datapoint {dp_id}: {field_name} -> {new_value}")
+
+    return corrected_ids
 
 
 def extract_sample_number(data) -> int | None:
@@ -477,6 +602,9 @@ def main():
         project_name=PROJECT_NAME,
     )
 
+    # --- APPLY RAW CORRECTIONS ---
+    corrected_ids = apply_raw_corrections(raw_full, CORRECTIONS_PATH)
+
     # Extract sample_number for grouping (schema differs by form type)
     raw_full["sample_number"] = raw_full["data"].apply(extract_sample_number)
 
@@ -523,6 +651,11 @@ def main():
                 "Existing latest parquet has no 's3_url' column (legacy export) — "
                 "not dropping rows with missing URLs."
             )
+        
+        if corrected_ids:
+            prev_len = len(already_processed_ids)
+            already_processed_ids -= corrected_ids
+            logger.info(f"Purged {len(already_processed_ids) - prev_len} rows from local memory due to YAML corrections.")
 
         logger.info(
             f"Loaded {latest_parquet.name}: "
