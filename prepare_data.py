@@ -644,6 +644,12 @@ def main():
     
     if latest_parquet:
         existing_df = pd.read_parquet(latest_parquet)
+
+        if corrected_ids and (not existing_df.empty):
+            before_row_count = len(existing_df)
+            existing_df = existing_df[~existing_df["datapoint_id"].isin(corrected_ids)]
+            logger.info(f"Purged {before_row_count - len(existing_df)} rows from existing_df to make corrections.")
+        
         already_processed_ids = set(existing_df["datapoint_id"].unique())
 
         if "s3_url" in existing_df.columns:
@@ -658,11 +664,6 @@ def main():
                 "not dropping rows with missing URLs."
             )
         
-        if corrected_ids:
-            prev_len = len(already_processed_ids)
-            already_processed_ids -= corrected_ids
-            logger.info(f"Purged {len(already_processed_ids) - prev_len} rows from local memory due to YAML corrections.")
-
         logger.info(
             f"Loaded {latest_parquet.name}: "
             f"{len(already_processed_ids)} already-processed datapoints, "
@@ -711,7 +712,7 @@ def main():
     new_processed = new_df
 
     # 8a. Merge with existing data
-    if existing_df is not None:
+    if not existing_df.empty:
         final_output_df = pd.concat([existing_df, new_processed], ignore_index=True)
         # dedup final df
         final_output_df = validate_and_dedup(final_output_df, is_processed=True)
