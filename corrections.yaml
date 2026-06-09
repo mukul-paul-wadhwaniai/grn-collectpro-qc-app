@@ -1,0 +1,25 @@
+corrections:
+  - datapoint_id: 49431005-0ce9-4424-8ade-c042bfd85873
+    field_name: background_name
+    old_value: "Sky blue cloth"
+    new_value: "Tarpaulin sheets: Blue"
+  - datapoint_id: 73201b21-9223-47ff-9a88-fef70eb61db2
+    field_name: background_name
+    old_value: "Red cloth"
+    new_value: "White cloth"
+  - datapoint_id: 59e5e2f6-61ff-4010-997a-c3fffc95ac7f
+    field_name: background_name
+    old_value: "Purple cloth"
+    new_value: "White cloth"
+  - datapoint_id: 304e8c40-c2be-450c-a990-ff08672d346a
+    field_name: background_name
+    old_value: "Orange cloth"
+    new_value: "White cloth"
+  - datapoint_id: 0a93cac3-51ba-420e-899e-0eac14d549cb
+    field_name: background_name
+    old_value: "Red cloth"
+    new_value: "White cloth"
+  - datapoint_id: 2bb100f8-b10c-452c-b3a8-85434613b028
+    field_name: weight
+    old_value: 540.0
+    new_value: 0.54
