@@ -163,7 +163,7 @@ def apply_raw_corrections(df: pd.DataFrame, corrections_path: Path) -> set:
         raw_data = copy.deepcopy(df.at[idx, 'data'])
         _set_nested_dict_value(raw_data, path, new_value)
         df.at[idx, 'data'] = raw_data
-        corrected_ids.add(int(dp_id))
+        corrected_ids.add(dp_id)
         logger.info(f"Applied raw correction to datapoint {dp_id}: {field_name} -> {new_value}")
 
     return corrected_ids
