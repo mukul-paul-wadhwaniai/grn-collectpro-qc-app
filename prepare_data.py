@@ -612,6 +612,8 @@ def main():
             f"Dropping {int(missing_sn.sum())} datapoints with no sample_number: {by_form}"
         )
         raw_full = raw_full[~missing_sn].copy()
+    
+    corrected_sample_numbers = set(raw_full[raw_full["datapoint_id"].isin(corrected_ids)]["sample_number"].unique())
 
     # 2b. Unified per-sample dashboard table (pre-dedup counts, all form types)
     dashboard_df = build_samples_dashboard_summary(raw_full, EXTRA_FORM_NAMES)
@@ -635,9 +637,9 @@ def main():
     if latest_parquet:
         existing_df = pd.read_parquet(latest_parquet)
 
-        if corrected_ids and (not existing_df.empty):
+        if corrected_sample_numbers and (not existing_df.empty):
             before_row_count = len(existing_df)
-            existing_df = existing_df[~existing_df["datapoint_id"].isin(corrected_ids)]
+            existing_df = existing_df[~existing_df["sample_number"].isin(corrected_sample_numbers)]
             logger.info(f"Purged {before_row_count - len(existing_df)} rows from existing_df to make corrections.")
         
         already_processed_ids = set(existing_df["datapoint_id"].unique())
