@@ -51,7 +51,7 @@ REF_NAME_MAPPING = {
 
 FIELD_NAME_TO_KEY_MAPPING = {
     # Common fields for all forms
-    'sample_number': 'sample_metadata.sample_number',
+    'sample_number': ['sample_metadata.sample_number', 'sample_number'],
     'weight': 'sample_metadata.weight_(in_grams)',
 
     # Category form
@@ -87,11 +87,17 @@ def _set_nested_dict_value(d: dict, path: str, value):
         logger.warning(f"Value is None for correction. Skipping correction for field {path}.")
         return
     
+    if isinstance(path, list):
+        for p in path:
+            _set_nested_dict_value(d, p, value)
+        return
+    
     keys = path.split('.')
     current = d
     for key in keys[:-1]:
         if key not in current or not isinstance(current[key], dict):
-            current[key] = {}
+            logger.warning(f"Key {key} not found in dictionary. Skipping correction for field {path}.")
+            return
         current = current[key]
     
     # Simple type normalization based on key targets
