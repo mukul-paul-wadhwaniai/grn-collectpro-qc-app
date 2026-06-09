@@ -102,24 +102,14 @@ def _set_nested_dict_value(d: dict, path: str, value):
     
     # Simple type normalization based on key targets
     target_key = keys[-1]
-    if target_key == 'sample_number':
-        try:
+    try:
+        if target_key == 'sample_number':
             value = int(value)
-        except (ValueError, TypeError):
-            logger.warning(f"New value for sample number is not an integer. Skipping correction for field {path}.")
-            return
-    elif 'moisture' in target_key:
-        try:
+        elif 'moisture' in target_key or 'weight' in target_key:
             value = float(value)
-        except (ValueError, TypeError):
-            logger.warning(f"New value for moisture is not a float. Skipping correction for field {path}.")
-            return
-    elif 'weight' in target_key:
-        try:
-            value = float(value)
-        except (ValueError, TypeError):
-            logger.warning(f"New value for weight is not a float. Skipping correction for field {path}.")
-            return
+    except (ValueError, TypeError):
+        logger.warning(f"Type conversion failed for '{target_key}' with value '{value}'. Skipping {path}.")
+        return
 
     current[target_key] = value
 
